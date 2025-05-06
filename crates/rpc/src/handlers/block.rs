@@ -1,17 +1,21 @@
 use std::collections::BTreeSet;
 
 use actix_web::{
-    HttpResponse, Responder, get,
-    web::{Data, Path},
+    HttpResponse, Responder, get, post,
+    web::{Data, Json, Path},
 };
 use alloy_primitives::B256;
 use ream_consensus::{
     attester_slashing::AttesterSlashing,
     constants::{
-        EFFECTIVE_BALANCE_INCREMENT, PROPOSER_WEIGHT, SLOTS_PER_EPOCH, SYNC_COMMITTEE_SIZE,
-        SYNC_REWARD_WEIGHT, WEIGHT_DENOMINATOR, WHISTLEBLOWER_REWARD_QUOTIENT,
+        EFFECTIVE_BALANCE_INCREMENT, INACTIVITY_PENALTY_QUOTIENT_BELLATRIX, INACTIVITY_SCORE_BIAS,
+        MIN_ATTESTATION_INCLUSION_DELAY, PROPOSER_WEIGHT, SLOTS_PER_EPOCH, SYNC_COMMITTEE_SIZE,
+        SYNC_REWARD_WEIGHT, TIMELY_HEAD_FLAG_INDEX, TIMELY_HEAD_WEIGHT, TIMELY_SOURCE_FLAG_INDEX,
+        TIMELY_SOURCE_WEIGHT, TIMELY_TARGET_FLAG_INDEX, TIMELY_TARGET_WEIGHT, WEIGHT_DENOMINATOR,
+        WHISTLEBLOWER_REWARD_QUOTIENT,
     },
     deneb::{beacon_block::SignedBeaconBlock, beacon_state::BeaconState},
+    misc::compute_start_slot_at_epoch,
 };
 use ream_network_spec::networks::NetworkSpec;
 use ream_storage::{
@@ -21,10 +25,13 @@ use ream_storage::{
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::types::{
-    errors::ApiError,
-    id::ID,
-    response::{BeaconResponse, BeaconVersionedResponse, DataResponse, RootResponse},
+use crate::{
+    handlers::state::get_state_from_id,
+    types::{
+        errors::ApiError,
+        id::{ID, ValidatorID},
+        response::{BeaconResponse, BeaconVersionedResponse, DataResponse, RootResponse},
+    },
 };
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -41,6 +48,44 @@ pub struct BlockRewards {
     pub proposer_slashings: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub attester_slashings: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct TotalReward {
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub validator_index: u64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub head: u64,
+    #[serde(with = "serde_utils::quoted_i64")]
+    pub target: i64,
+    #[serde(with = "serde_utils::quoted_i64")]
+    pub source: i64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub inclusion_delay: u64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub inactivity: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct IdealReward {
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub effective_balance: u64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub head: u64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub target: u64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub source: u64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub inclusion_delay: u64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub inactivity: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct AttestationRewards {
+    pub ideal_rewards: Vec<IdealReward>,
+    pub total_rewards: Vec<TotalReward>,
 }
 
 pub async fn get_block_root_from_id(block_id: ID, db: &ReamDB) -> Result<B256, ApiError> {
@@ -279,4 +324,148 @@ pub async fn get_block_from_id(
     let beacon_block = get_beacon_block_from_id(block_id.into_inner(), &db).await?;
 
     Ok(HttpResponse::Ok().json(BeaconVersionedResponse::new(beacon_block)))
+}
+
+#[post("/beacon/rewards/attestations/{epoch}")]
+pub async fn get_attestations_rewards_from_epoch(
+    db: Data<ReamDB>,
+    epoch: Path<u64>,
+    validator_ids: Option<Json<Vec<ValidatorID>>>,
+) -> Result<impl Responder, ApiError> {
+    let epoch_value = epoch.into_inner();
+
+    let state = get_state_from_id(ID::Slot(compute_start_slot_at_epoch(epoch_value)), &db).await?;
+
+    let mut validator_indices_to_process = Vec::new();
+
+    // Source: src/handlers/validator.rs
+    if let Some(ids) = validator_ids {
+        for validator_id in ids.iter() {
+            let index = match validator_id {
+                ValidatorID::Index(i) => {
+                    if *i as usize >= state.validators.len() {
+                        return Err(ApiError::NotFound(format!(
+                            "Validator not found for index: {i}"
+                        )));
+                    }
+                    *i as usize
+                }
+                ValidatorID::Address(pubkey) => {
+                    match state
+                        .validators
+                        .iter()
+                        .enumerate()
+                        .find(|(_, v)| v.pubkey == *pubkey)
+                    {
+                        Some((i, _)) => i,
+                        None => {
+                            return Err(ApiError::NotFound(format!(
+                                "Validator not found for pubkey: {pubkey:?}"
+                            )));
+                        }
+                    }
+                }
+            };
+            validator_indices_to_process.push(index);
+        }
+    } else {
+        validator_indices_to_process = (0..state.validators.len()).collect();
+    }
+
+    let mut ideal_rewards = Vec::new();
+    let mut total_rewards = Vec::new();
+
+    for validator_index in validator_indices_to_process {
+        let validator = &state.validators[validator_index as usize];
+        let base_reward = state.get_base_reward(validator_index as u64);
+
+        let source_reward = base_reward * TIMELY_SOURCE_WEIGHT / WEIGHT_DENOMINATOR;
+        let target_reward = base_reward * TIMELY_TARGET_WEIGHT / WEIGHT_DENOMINATOR;
+        let head_reward = base_reward * TIMELY_HEAD_WEIGHT / WEIGHT_DENOMINATOR;
+        let inclusion_delay_reward = base_reward / MIN_ATTESTATION_INCLUSION_DELAY;
+
+        let inactivity_penalty = if state.is_in_inactivity_leak() {
+            let score = state.inactivity_scores[validator_index as usize];
+            validator.effective_balance * score
+                / (INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX)
+        } else {
+            0
+        };
+
+        ideal_rewards.push(IdealReward {
+            effective_balance: validator.effective_balance,
+            head: head_reward,
+            target: target_reward,
+            source: source_reward,
+            inclusion_delay: inclusion_delay_reward,
+            inactivity: inactivity_penalty,
+        });
+
+        let mut actual_head_reward = 0;
+        let actual_target_reward;
+        let actual_source_reward;
+        let mut actual_inclusion_delay_reward = 0;
+        let mut actual_inactivity_penalty = 0;
+
+        let head_indices = state
+            .get_unslashed_participating_indices(TIMELY_HEAD_FLAG_INDEX, epoch_value)
+            .map_err(|_| ApiError::InternalError)?;
+
+        let target_indices = state
+            .get_unslashed_participating_indices(TIMELY_TARGET_FLAG_INDEX, epoch_value)
+            .map_err(|_| ApiError::InternalError)?;
+
+        let source_indices = state
+            .get_unslashed_participating_indices(TIMELY_SOURCE_FLAG_INDEX, epoch_value)
+            .map_err(|_| ApiError::InternalError)?;
+
+        let base_reward = state.get_base_reward(validator_index as u64);
+
+        if head_indices.contains(&(validator_index as u64)) {
+            let head_reward = base_reward * TIMELY_HEAD_WEIGHT / WEIGHT_DENOMINATOR;
+            actual_head_reward = head_reward;
+        }
+
+        if target_indices.contains(&(validator_index as u64)) {
+            let target_reward = base_reward * TIMELY_TARGET_WEIGHT / WEIGHT_DENOMINATOR;
+            actual_target_reward = target_reward as i64;
+        } else {
+            actual_target_reward =
+                -((base_reward * TIMELY_TARGET_WEIGHT / WEIGHT_DENOMINATOR) as i64);
+        }
+
+        if source_indices.contains(&(validator_index as u64)) {
+            let source_reward = base_reward * TIMELY_SOURCE_WEIGHT / WEIGHT_DENOMINATOR;
+            actual_source_reward = source_reward as i64;
+        } else {
+            actual_source_reward =
+                -((base_reward * TIMELY_SOURCE_WEIGHT / WEIGHT_DENOMINATOR) as i64);
+        }
+
+        if source_indices.contains(&(validator_index as u64)) {
+            actual_inclusion_delay_reward = base_reward / MIN_ATTESTATION_INCLUSION_DELAY;
+        }
+
+        if state.is_in_inactivity_leak() {
+            let score = state.inactivity_scores[validator_index as usize];
+            let validator = &state.validators[validator_index as usize];
+            actual_inactivity_penalty = validator.effective_balance * score
+                / (INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX);
+        }
+
+        total_rewards.push(TotalReward {
+            validator_index: validator_index as u64,
+            head: actual_head_reward,
+            target: actual_target_reward,
+            source: actual_source_reward,
+            inclusion_delay: actual_inclusion_delay_reward,
+            inactivity: actual_inactivity_penalty,
+        });
+    }
+
+    let response = AttestationRewards {
+        ideal_rewards,
+        total_rewards,
+    };
+    Ok(HttpResponse::Ok().json(BeaconResponse::new(response)))
 }

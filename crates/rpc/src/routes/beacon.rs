@@ -2,7 +2,8 @@ use actix_web::web::ServiceConfig;
 
 use crate::handlers::{
     block::{
-        get_block_attestations, get_block_from_id, get_block_rewards, get_block_root, get_genesis,
+        get_attestations_rewards_from_epoch, get_block_attestations, get_block_from_id,
+        get_block_rewards, get_block_root, get_genesis,
     },
     header::get_headers,
     state::{
@@ -29,7 +30,8 @@ pub fn register_beacon_routes(cfg: &mut ServiceConfig) {
         .service(get_headers)
         .service(get_block_root)
         .service(get_block_rewards)
-        .service(get_pending_partial_withdrawals);
+        .service(get_pending_partial_withdrawals)
+        .service(get_attestations_rewards_from_epoch);
 }
 pub fn register_beacon_routes_v2(cfg: &mut ServiceConfig) {
     cfg.service(get_block_attestations)

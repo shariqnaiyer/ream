@@ -672,7 +672,7 @@ impl BeaconState {
                 let penalty_denominator =
                     INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX;
                 penalties[index as usize] += penalty_numerator / penalty_denominator;
-            }
+            } 
         }
         Ok((rewards, penalties))
     }
