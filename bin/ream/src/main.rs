@@ -1,11 +1,28 @@
+// Get the process's environment variables
 use std::env;
 
+// Command line parser
 use clap::Parser;
+
+// This is the Cli module which implements structs and types necessary for the cli
 use ream::cli::{Cli, Commands};
+
+// TODO: What is a checkpoint sync?
 use ream_checkpoint_sync::initialize_db_from_checkpoint;
+
+
+// TODO: What is DiscV5?
 use ream_discv5::{config::DiscoveryConfig, eth2::EnrForkId, subnet::Subnets};
+
+// TODO: What is Ream Executor
 use ream_executor::ReamExecutor;
+
+// I think I know what spec is
+// It stores all the config values 
 use ream_network_spec::networks::{network_spec, set_network_spec};
+
+// This is likely very important
+// 
 use ream_p2p::{
     config::NetworkConfig,
     gossipsub::{
@@ -14,11 +31,18 @@ use ream_p2p::{
     },
     network::Network,
 };
+
+// This allows us to create a Beacon API server
+// So Users (through web3 libraries) access our client using the Beacon API
 use ream_rpc::{config::ServerConfig, start_server};
+
+// So we use a key value store called redb for storage for the client
 use ream_storage::{
     db::{ReamDB, reset_db},
     dir::setup_data_dir,
 };
+
+// This is for event based logging
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 

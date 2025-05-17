@@ -1,15 +1,44 @@
+
+/// Standard library imports for network addressing, file paths, and thread-safe reference counting.
+///
+/// This module provides types for:
+/// - `IpAddr` and `Ipv4Addr` for network address representation
+/// - `PathBuf` for filesystem path manipulation
+/// - `Arc` for thread-safe reference counting of shared resources
 use std::{
     net::{IpAddr, Ipv4Addr},
     path::PathBuf,
     sync::Arc,
 };
 
+// Standard library imports for command-line argument parsing and error handling.
+// Command Line Argument Parser for Rust
 use clap::{Parser, Subcommand};
+
+// Network Spec
+// This includes the functions required to select a network specification
+// The network specification
+// TODO: Read into Network Specifications and why they are necessary
 use ream_network_spec::{cli::network_parser, networks::NetworkSpec};
+
+// Get node version
+// We get this from env
 use ream_node::version::FULL_VERSION;
+
+/// Represents the collection of bootstrap nodes (bootnodes) for peer-to-peer network discovery and initial connection.
+///
+/// Bootnodes are predefined, well-known network nodes that help new nodes join the peer-to-peer network
+/// by providing initial peer information and facilitating network connectivity.
+/// We get this from sometimes string sometimes spec 
+/// 
+/// TODO: Read into Bootnodes
 use ream_p2p::bootnodes::Bootnodes;
+
+// The reqwest crate provides a convenient, higher-level HTTP Client.
+// You can make requests with this.
 use reqwest::Url;
 
+// We define constants
 const DEFAULT_DISABLE_DISCOVERY: bool = false;
 const DEFAULT_DISCOVERY_PORT: u16 = 9000;
 const DEFAULT_HTTP_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
