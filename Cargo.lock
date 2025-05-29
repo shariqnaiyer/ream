@@ -5260,6 +5260,7 @@ dependencies = [
  "ream-consensus",
  "ream-execution-engine",
  "ream-network-spec",
+ "ream-rpc",
  "reqwest",
  "serde",
  "serde_json",
