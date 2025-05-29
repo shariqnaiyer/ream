@@ -61,12 +61,11 @@ use crate::{
         MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA, MIN_VALIDATOR_WITHDRAWABILITY_DELAY,
         NEXT_SYNC_COMMITTEE_INDEX, PARTICIPATION_FLAG_WEIGHTS, PENDING_CONSOLIDATIONS_LIMIT,
         PENDING_PARTIAL_WITHDRAWALS_LIMIT, PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX,
-        PROPOSER_REWARD_QUOTIENT, PROPOSER_WEIGHT, SAFETY_DECAY, SECONDS_PER_SLOT,
-        SHARD_COMMITTEE_PERIOD, SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT, SYNC_COMMITTEE_SIZE,
-        SYNC_REWARD_WEIGHT, TARGET_COMMITTEE_SIZE, TIMELY_HEAD_FLAG_INDEX,
-        TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX, UINT64_MAX, UINT64_MAX_SQRT,
-        UNSET_DEPOSIT_REQUESTS_START_INDEX, WEIGHT_DENOMINATOR,
-        WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA,
+        PROPOSER_REWARD_QUOTIENT, PROPOSER_WEIGHT, SECONDS_PER_SLOT, SHARD_COMMITTEE_PERIOD,
+        SLOTS_PER_EPOCH, SLOTS_PER_HISTORICAL_ROOT, SYNC_COMMITTEE_SIZE, SYNC_REWARD_WEIGHT,
+        TARGET_COMMITTEE_SIZE, TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX,
+        TIMELY_TARGET_FLAG_INDEX, UINT64_MAX, UINT64_MAX_SQRT, UNSET_DEPOSIT_REQUESTS_START_INDEX,
+        WEIGHT_DENOMINATOR, WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA,
     },
     deposit::Deposit,
     deposit_message::DepositMessage,
@@ -390,20 +389,6 @@ impl BeaconState {
         self.compute_proposer_index(&indices, seed)
     }
 
-    /// Return the beacon proposer index at the given slot.
-    pub fn get_beacon_proposer_index_at_slot(&self, slot: u64) -> anyhow::Result<u64> {
-        let epoch = compute_epoch_at_slot(slot);
-        let seed = B256::from(hash_fixed(
-            &[
-                self.get_seed(epoch, DOMAIN_BEACON_PROPOSER).as_slice(),
-                &slot.to_le_bytes(),
-            ]
-            .concat(),
-        ));
-        let indices = self.get_active_validator_indices(epoch);
-        self.compute_proposer_index(&indices, seed)
-    }
-
     /// Return the combined effective balance of the ``indices``.
     /// ``EFFECTIVE_BALANCE_INCREMENT`` Gwei minimum to avoid divisions by zero.
     /// Math safe up to ~10B ETH, after which this overflows uint64.
@@ -456,35 +441,6 @@ impl BeaconState {
             (slot % SLOTS_PER_EPOCH) * committees_per_slot + index,
             committees_per_slot * SLOTS_PER_EPOCH,
         )
-    }
-
-    /// Return the committee assignment in the ``epoch`` for ``validator_index``.
-    /// ``assignment`` returned is a tuple of the following form:
-    ///     * ``assignment[0]`` is the list of validators in the committee
-    ///     * ``assignment[1]`` is the index to which the committee is assigned
-    ///     * ``assignment[2]`` is the slot at which the committee is assigned
-    /// Return None if no assignment.
-    pub fn get_committee_assignment(
-        &self,
-        epoch: u64,
-        validator_index: u64,
-    ) -> anyhow::Result<Option<(Vec<u64>, u64, u64)>> {
-        let next_epoch = self.get_current_epoch() + 1;
-        ensure!(
-            epoch <= next_epoch,
-            "Requested epoch {epoch} is beyond the allowed maximum (next epoch: {next_epoch})",
-        );
-        let start_slot = compute_start_slot_at_epoch(epoch);
-        let committee_count_per_slot = self.get_committee_count_per_slot(epoch);
-        for slot in start_slot..start_slot + SLOTS_PER_EPOCH {
-            for index in 0..committee_count_per_slot {
-                let committee = self.get_beacon_committee(slot, index)?;
-                if committee.contains(&validator_index) {
-                    return Ok(Some((committee, index, slot)));
-                }
-            }
-        }
-        Ok(None)
     }
 
     /// Check if ``indexed_attestation`` is not empty, has sorted and unique indices and has a valid
@@ -2690,16 +2646,6 @@ impl BeaconState {
         self.earliest_consolidation_epoch = earliest_consolidation_epoch;
 
         self.earliest_consolidation_epoch
-    }
-
-    /// Returns the weak subjectivity period for the current ``state``.
-    /// This computation takes into account the effect of:
-    /// - validator set churn (bounded by ``get_balance_churn_limit()`` per epoch).
-    pub fn compute_weak_subjectivity_period(&self) -> u64 {
-        let active_balance_eth = self.get_total_active_balance();
-        let delta = self.get_balance_churn_limit();
-        let epochs_for_validator_set_churn = SAFETY_DECAY * active_balance_eth / (2 * delta * 100);
-        MIN_VALIDATOR_WITHDRAWABILITY_DELAY + epochs_for_validator_set_churn
     }
 
     pub fn merkle_leaves(&self) -> Vec<B256> {
