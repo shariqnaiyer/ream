@@ -78,15 +78,18 @@ impl BeaconApiClient {
         &self,
         slot: u64,
         randao_reveal: BLSSignature,
-        graffiti: B256,
+        graffiti: Option<B256>,
         skip_randao_verification: Option<bool>,
         builder_boost_factor: Option<u64>,
     ) -> anyhow::Result<ProduceBlock> {
         let mut request_builder = self
             .http_client
             .get(format!("/eth/v3/validator/blocks/{slot}"))?
-            .query(&[("randao_reveal", format!("{:?}", randao_reveal))])
-            .query(&[("graffiti", format!("0x{}", hex::encode(graffiti)))]);
+            .query(&[("randao_reveal", format!("{:?}", randao_reveal))]);
+
+        if let Some(graffiti_value) = graffiti {
+            request_builder = request_builder.query(&[("graffiti", format!("0x{}", hex::encode(graffiti_value)))]);
+        }
 
         if let Some(skip_randao) = skip_randao_verification {
             request_builder =
