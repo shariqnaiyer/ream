@@ -4,21 +4,11 @@ use std::time::Duration;
 
 use anyhow;
 use http_client::{ClientWithBaseUrl, ContentType};
-use ream_rpc::{handlers::duties::ProposerDuty, types::response::DutiesResponse};
-use reqwest::{StatusCode, Url};
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum BeaconApiError {
-    #[error("API request failed with status code: {status_code}")]
-    RequestFailed { status_code: StatusCode },
-    #[error("SSZ decode error: {0}")]
-    SszDecode(String),
-    #[error("JSON decode error: {0}")]
-    JsonDecode(String),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
+use ream_beacon_api_types::{
+    duties::ProposerDuty, error::BeaconApiClientError, responses::DutiesResponse,
+};
+use reqwest::Url;
+use ssz::Decode;
 
 pub struct BeaconApiClient {
     pub http_client: ClientWithBaseUrl,
@@ -38,31 +28,37 @@ impl BeaconApiClient {
     pub async fn get_proposer_duties(
         &self,
         epoch: u64,
-    ) -> Result<DutiesResponse<ProposerDuty>, BeaconApiError> {
-        let response = self.http_client.execute(self
+    ) -> Result<DutiesResponse<ProposerDuty>, BeaconApiClientError> {
+        let response = self
             .http_client
-            .get(format!("eth/v1/validator/duties/proposer/{epoch}"))?
-            .build()?).await?;
+            .execute(
+                self.http_client
+                    .get(format!("eth/v1/validator/duties/proposer/{epoch}"))?
+                    .build()?,
+            )
+            .await?;
 
         if !response.status().is_success() {
-            return Err(BeaconApiError::RequestFailed {
+            return Err(BeaconApiClientError::RequestFailed {
                 status_code: response.status(),
             });
         }
 
-        let content_type = response
+        let is_ssz = response
             .headers()
             .get("content-type")
-            .and_then(|content_type| content_type.to_str().ok());
+            .and_then(|content_type| content_type.to_str().ok())
+            .is_some_and(|content_type| content_type.contains("application/octet-stream"));
 
-        let proposer_duties: DutiesResponse<ProposerDuty> =
-            if content_type.contains("application/octet-stream") {
-                DutiesResponse::from_ssz_bytes(&response.bytes().await?)
-                    .map_err(|err| BeaconApiError::SszDecode(err.to_string()))?
-            } else {
-                response.json().await
-                    .map_err(|err| BeaconApiError::JsonDecode(err.to_string()))?
-            };
+        let proposer_duties = if is_ssz {
+            DutiesResponse::from_ssz_bytes(&response.bytes().await?)
+                .map_err(|err| BeaconApiClientError::SszDecode(format!("{:?}", err)))?
+        } else {
+            response
+                .json()
+                .await
+                .map_err(|err| BeaconApiClientError::JsonDecode(err.to_string()))?
+        };
 
         Ok(proposer_duties)
     }
