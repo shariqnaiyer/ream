@@ -27,6 +27,6 @@ pub enum BeaconApiClientError {
     #[error("Invalid response format")]
     InvalidResponse,
 
-    #[error("Generic error: {0}")]
-    Generic(#[from] anyhow::Error),
+    #[error("Anyhow error: {0}")]
+    Anyhow(#[from] anyhow::Error),
 }
