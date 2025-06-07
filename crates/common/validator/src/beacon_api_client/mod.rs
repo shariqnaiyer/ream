@@ -49,10 +49,7 @@ impl BeaconApiClient {
         })
     }
 
-    pub fn get_header_str<'a>(
-        headers: &'a HeaderMap,
-        key: &'a str,
-    ) -> Result<&'a str, anyhow::Error> {
+    pub fn get_header_str<'a>(headers: &'a HeaderMap, key: &'a str) -> anyhow::Result<&'a str> {
         headers
             .get(key)
             .ok_or_else(|| anyhow!("Header '{key}' not found"))?
@@ -60,10 +57,7 @@ impl BeaconApiClient {
             .map_err(|err| anyhow!("Failed to convert header '{key}' to string: {err}"))
     }
 
-    pub fn parse_header<T: std::str::FromStr>(
-        headers: &HeaderMap,
-        key: &str,
-    ) -> Result<T, anyhow::Error>
+    pub fn parse_header<T: std::str::FromStr>(headers: &HeaderMap, key: &str) -> anyhow::Result<T>
     where
         <T as FromStr>::Err: std::error::Error,
     {
