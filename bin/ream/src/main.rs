@@ -280,6 +280,6 @@ pub async fn run_voluntary_exit(config: VoluntaryExitConfig, executor: ReamExecu
     .await
     {
         Ok(()) => info!("Voluntary exit completed successfully"),
-        Err(err) => error!("Voluntary exit failed: {}", err),
+        Err(err) => error!("Voluntary exit failed: {err}"),
     }
 }
