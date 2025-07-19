@@ -9,6 +9,7 @@ use ream::cli::{
     validator_node::ValidatorNodeConfig,
     voluntary_exit::VoluntaryExitConfig,
 };
+use ream_beacon_api_types::id;
 use ream_checkpoint_sync::initialize_db_from_checkpoint;
 use ream_consensus::constants::set_genesis_validator_root;
 use ream_executor::ReamExecutor;
@@ -21,7 +22,9 @@ use ream_storage::{
     dir::setup_data_dir,
     tables::Table,
 };
-use ream_validator::validator::ValidatorService;
+use ream_validator::{
+    beacon_api_client, validator::ValidatorService, voluntary_exit::process_voluntary_exit,
+};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -56,7 +59,7 @@ fn main() {
             executor_clone.spawn(async move { run_account_manager(*config).await });
         }
         Commands::VoluntaryExit(config) => {
-            executor_clone.spawn(async move { run_voluntary_exit(*config, executor).await });
+            executor_clone.spawn(async move { run_voluntary_exit(*config).await });
         }
     }
 
@@ -188,7 +191,7 @@ pub async fn run_validator_node(config: ValidatorNodeConfig, executor: ReamExecu
         }
     });
 
-    let key_stores = load_keystore_directory(&config.import_keystores)
+    let keystores = load_keystore_directory(&config.import_keystores)
         .expect("Failed to load keystore directory")
         .into_iter()
         .map(|encrypted_keystore| {
@@ -199,7 +202,7 @@ pub async fn run_validator_node(config: ValidatorNodeConfig, executor: ReamExecu
         .collect::<Vec<_>>();
 
     let validator_service = ValidatorService::new(
-        key_stores,
+        keystores,
         config.suggested_fee_recipient,
         config.beacon_api_endpoint,
         config.request_timeout,
@@ -237,7 +240,7 @@ pub async fn run_account_manager(mut config: AccountManagerConfig) {
 ///
 /// This function initializes the voluntary exit process by setting up the network specification,
 /// loading the keystores, creating a validator service, and processing the voluntary exit.
-pub async fn run_voluntary_exit(config: VoluntaryExitConfig, executor: ReamExecutor) {
+pub async fn run_voluntary_exit(config: VoluntaryExitConfig) {
     info!("Starting voluntary exit process...");
 
     set_network_spec(config.network.clone());
@@ -252,7 +255,7 @@ pub async fn run_voluntary_exit(config: VoluntaryExitConfig, executor: ReamExecu
         }
     });
 
-    let key_stores = load_keystore_directory(&config.import_keystores)
+    let keystores = load_keystore_directory(&config.import_keystores)
         .expect("Failed to load keystore directory")
         .into_iter()
         .map(|encrypted_keystore| {
@@ -262,19 +265,25 @@ pub async fn run_voluntary_exit(config: VoluntaryExitConfig, executor: ReamExecu
         })
         .collect::<Vec<_>>();
 
-    let validator_service = ValidatorService::new(
-        key_stores,
-        Default::default(),
-        config.beacon_api_endpoint,
-        config.request_timeout,
-        executor,
-    )
-    .expect("Failed to create validator service");
+    let beacon_api_client =
+        beacon_api_client::BeaconApiClient::new(config.beacon_api_endpoint, config.request_timeout)
+            .expect("Failed to create beacon API client");
 
-    match ream_validator::voluntary_exit::process_voluntary_exit(
-        validator_service,
+    let validator_info = beacon_api_client
+        .get_state_validator(id::ID::Head, id::ValidatorID::Index(config.validator_index))
+        .await
+        .expect("Failed to get validator info");
+
+    let keystore = keystores
+        .iter()
+        .find(|keystore| keystore.public_key == validator_info.data.validator.public_key)
+        .expect("No keystore found for the specified validator index");
+
+    match process_voluntary_exit(
+        &beacon_api_client,
         config.validator_index,
         config.epoch,
+        &keystore.private_key,
         config.wait,
     )
     .await
