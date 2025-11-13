@@ -164,10 +164,15 @@ impl LeanState {
         self.process_block(block)
             .context("failed to process block")?;
 
-        ensure!(
-            block.state_root == self.tree_hash_root(),
-            "Invalid block state root"
-        );
+        let computed_state_root = self.tree_hash_root();
+        if block.state_root != computed_state_root {
+            use alloy_primitives::hex;
+            eprintln!("State root mismatch at slot {}:", block.slot);
+            eprintln!("  Expected (from block): 0x{}", hex::encode(block.state_root));
+            eprintln!("  Computed (after processing): 0x{}", hex::encode(computed_state_root));
+            eprintln!("  State slot: {}", self.slot);
+            anyhow::bail!("Invalid block state root");
+        }
 
         Ok(())
     }
