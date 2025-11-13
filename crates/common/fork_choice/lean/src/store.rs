@@ -579,7 +579,7 @@ impl Store {
                 // TODO: Add signature, https://github.com/ReamLabs/ream/issues/848.
                 signature: Signature::blank(),
             },
-            false,
+            true,
         )
         .await?;
 
@@ -594,11 +594,14 @@ impl Store {
         let data = &attestation.data;
         let block_provider = self.store.lock().await.lean_block_provider();
 
-        ensure!(
-            block_provider.contains_key(data.source.root),
-            "Unknown source block: {}",
-            data.source.root
-        );
+        // Special case: B256::ZERO represents genesis and doesn't need to exist in the store
+        if data.source.root != B256::ZERO {
+            ensure!(
+                block_provider.contains_key(data.source.root),
+                "Unknown source block: {}",
+                data.source.root
+            );
+        }
         ensure!(
             block_provider.contains_key(data.target.root),
             "Unknown target block: {}",
@@ -610,25 +613,29 @@ impl Store {
             data.head.root
         );
 
-        let source_block = block_provider
-            .get(data.source.root)?
-            .ok_or(anyhow!("Failed to get source block"))?;
         let target_block = block_provider
             .get(data.target.root)?
             .ok_or(anyhow!("Failed to get target block"))?;
 
-        ensure!(
-            source_block.message.block.slot <= target_block.message.block.slot,
-            "Source slot must not exceed target"
-        );
+        // Only validate source-target relationship if source is not genesis
+        if data.source.root != B256::ZERO {
+            let source_block = block_provider
+                .get(data.source.root)?
+                .ok_or(anyhow!("Failed to get source block"))?;
+
+            ensure!(
+                source_block.message.block.slot <= target_block.message.block.slot,
+                "Source slot must not exceed target"
+            );
+            ensure!(
+                source_block.message.block.slot == data.source.slot,
+                "Source checkpoint slot mismatch"
+            );
+        }
+
         ensure!(
             data.source.slot <= data.target.slot,
             "Source checkpoint slot must not exceed target"
-        );
-
-        ensure!(
-            source_block.message.block.slot == data.source.slot,
-            "Source checkpoint slot mismatch"
         );
         ensure!(
             target_block.message.block.slot == data.target.slot,
