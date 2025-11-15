@@ -25,13 +25,9 @@ use crate::types::{
 
 /// Load a fork choice test fixture from a JSON file
 pub fn load_fork_choice_test(path: impl AsRef<Path>) -> Result<TestFixture<ForkChoiceTest>> {
-    let content = std::fs::read_to_string(path.as_ref())
-        .with_context(|| format!("Failed to read test file: {:?}", path.as_ref().display()))?;
-
-    let fixture: TestFixture<ForkChoiceTest> = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse test file: {:?}", path.as_ref().display()))?;
-
-    Ok(fixture)
+    Ok(serde_json::from_str(&std::fs::read_to_string(path.as_ref())
+        .with_context(|| format!("Failed to read test file: {:?}", path.as_ref().display()))?)
+        .with_context(|| format!("Failed to parse test file: {:?}", path.as_ref().display()))?)
 }
 
 /// Run a single fork choice test case
@@ -42,14 +38,13 @@ pub async fn run_fork_choice_test(test_name: &str, test: &ForkChoiceTest) -> Res
     // Use genesis_time from the test's anchor state config
     use ream_network_spec::networks::{Devnet, LEAN_NETWORK_SPEC};
     if LEAN_NETWORK_SPEC.get().is_none() {
-        let network_spec = LeanNetworkSpec {
+        set_lean_network_spec(std::sync::Arc::new(LeanNetworkSpec {
             genesis_time: test.anchor_state.config.genesis_time,
             justification_lookback_slots: 3,
             seconds_per_slot: 4,
             num_validators: test.anchor_state.validators.data.len() as u64,
             devnet: Devnet::One,
-        };
-        set_lean_network_spec(std::sync::Arc::new(network_spec));
+        }));
     }
 
     // Convert anchor state and block
@@ -59,31 +54,8 @@ pub async fn run_fork_choice_test(test_name: &str, test: &ForkChoiceTest) -> Res
     let anchor_block =
         convert_block(&test.anchor_block).context("Failed to convert anchor block")?;
 
-    // Wrap anchor block in SignedBlockWithAttestation
-    let anchor_signed = SignedBlockWithAttestation {
-        message: BlockWithAttestation {
-            block: anchor_block.clone(),
-            proposer_attestation: ream_consensus_lean::attestation::Attestation {
-                validator_id: anchor_block.proposer_index,
-                data: ream_consensus_lean::attestation::AttestationData {
-                    slot: anchor_block.slot,
-                    head: ream_consensus_lean::checkpoint::Checkpoint {
-                        root: anchor_block.tree_hash_root(),
-                        slot: anchor_block.slot,
-                    },
-                    target: anchor_state.latest_justified,
-                    source: anchor_state.latest_finalized,
-                },
-            },
-        },
-        signature: VariableList::empty(),
-    };
-
     // Setup test database
-    let test_dir =
-        setup_data_dir("lean_spec_tests", None, true).context("Failed to setup test directory")?;
-    let ream_db = ReamDB::new(test_dir).context("Failed to create ReamDB")?;
-    let db = ream_db
+    let db = ReamDB::new(setup_data_dir("lean_spec_tests", None, true).context("Failed to setup test directory")?).context("Failed to create ReamDB")?
         .init_lean_db()
         .context("Failed to initialize LeanDB")?;
 
@@ -95,7 +67,24 @@ pub async fn run_fork_choice_test(test_name: &str, test: &ForkChoiceTest) -> Res
 
     // Store the anchor block using this block root
     db.lean_block_provider()
-        .insert(anchor_block_root, anchor_signed)?;
+        .insert(anchor_block_root, SignedBlockWithAttestation {
+            message: BlockWithAttestation {
+                block: anchor_block.clone(),
+                proposer_attestation: ream_consensus_lean::attestation::Attestation {
+                    validator_id: anchor_block.proposer_index,
+                    data: ream_consensus_lean::attestation::AttestationData {
+                        slot: anchor_block.slot,
+                        head: ream_consensus_lean::checkpoint::Checkpoint {
+                            root: anchor_block.tree_hash_root(),
+                            slot: anchor_block.slot,
+                        },
+                        target: anchor_state.latest_justified,
+                        source: anchor_state.latest_finalized,
+                    },
+                },
+            },
+            signature: VariableList::empty(),
+        })?;
 
     // Store the anchor state
     db.lean_state_provider()
@@ -144,34 +133,29 @@ pub async fn run_fork_choice_test(test_name: &str, test: &ForkChoiceTest) -> Res
                 let ream_block = convert_block(block).context("Failed to convert block")?;
 
                 // Advance time to the block's slot before processing
-                let time = ream_block.slot * lean_network_spec().seconds_per_slot;
                 {
                     let db = store.store.lock().await;
-                    db.lean_time_provider().insert(time)?;
+                    db.lean_time_provider().insert(ream_block.slot * lean_network_spec().seconds_per_slot)?;
                 }
 
                 // Get the parent state and parent block to extract the correct checkpoints
                 let db = store.store.lock().await;
 
-                let parent_state = db
+                let source_checkpoint = db
                     .lean_state_provider()
                     .get(ream_block.parent_root)?
                     .context(format!(
                         "Parent state not found for parent_root: {}",
                         ream_block.parent_root
-                    ))?;
+                    ))?.latest_justified;
 
-                let parent_block = db
+                let parent_slot = db
                     .lean_block_provider()
                     .get(ream_block.parent_root)?
                     .context(format!(
                         "Parent block not found for parent_root: {}",
                         ream_block.parent_root
-                    ))?;
-
-                let source_checkpoint = parent_state.latest_justified;
-
-                let parent_slot = parent_block.message.block.slot;
+                    ))?.message.block.slot;
 
                 drop(db);
 
