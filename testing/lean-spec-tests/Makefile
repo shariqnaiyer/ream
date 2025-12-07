@@ -1,7 +1,5 @@
-
 EXTRACT_DIR = fixtures
 REPO_URL = https://github.com/ReamLabs/lean-spec-tests.git
-TEMP_DIR = .lean-spec-tests-tmp
 
 .PHONY: all clean test
 
@@ -12,11 +10,7 @@ $(EXTRACT_DIR):
 		echo "$(EXTRACT_DIR) already exists. Skipping download."; \
 	else \
 		echo "Cloning lean-spec-tests from GitHub..."; \
-		git clone --depth 1 --quiet $(REPO_URL) $(TEMP_DIR) || { echo "Clone failed. Repository may be private or inaccessible."; exit 1; }; \
-		echo "Copying fixtures..."; \
-		mkdir -p $(EXTRACT_DIR); \
-		cp -r $(TEMP_DIR)/* $(EXTRACT_DIR)/; \
-		rm -rf $(TEMP_DIR); \
+		git clone --depth 1 --quiet $(REPO_URL) $(EXTRACT_DIR) || { echo "Clone failed. Repository may be private or inaccessible."; exit 1; }; \
 		echo "Fixtures downloaded successfully."; \
 	fi
 
@@ -27,5 +21,5 @@ test: $(EXTRACT_DIR)
 
 clean:
 	@echo "Cleaning up downloaded fixtures..."
-	@rm -rf $(EXTRACT_DIR) $(TEMP_DIR)
+	@rm -rf $(EXTRACT_DIR)
 	@echo "Clean up complete."

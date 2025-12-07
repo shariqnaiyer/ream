@@ -31,7 +31,9 @@ members = [
     "crates/crypto/post_quantum",
     "crates/networking/discv5",
     "crates/networking/manager",
+    "crates/networking/network_state/lean",
     "crates/networking/p2p",
+    "crates/networking/peer",
     "crates/networking/syncer",
     "crates/rpc/beacon",
     "crates/rpc/common",
@@ -82,25 +84,25 @@ alloy-rpc-types-beacon = "1.0.41"
 alloy-rpc-types-eth = "1.0.41"
 anyhow = "1.0.100"
 async-trait = "0.1.89"
-bincode = { version = "2.0.1", features = ["serde"] }
 bip39 = { version = "2.2.0", features = ["rand"] }
 clap = "4.5.50"
+const-hex = "1.17"
 delay_map = "0.4.1"
 directories = { version = "6.0.0" }
 discv5 = { version = "0.10.2", features = ["libp2p"] }
 enr = "0.13.0"
 ethereum_hashing = { git = "https://github.com/ReamLabs/ethereum_hashing.git", rev = "c14a9ad96436e6b8b631faf49a3666e4558b71ae" }
 ethereum_serde_utils = "0.8"
-ethereum_ssz = "0.9.1"
-ethereum_ssz_derive = "0.9.1"
+ethereum_ssz = "0.10"
+ethereum_ssz_derive = "0.10"
 eventsource-client = "0.15.1"
 futures = "0.3"
 hashbrown = "0.16.0"
-hashsig = { git = "https://github.com/b-wagn/hash-sig", rev = "9f2b0bbaa9deee3d072122b32c39b8027c3fccd8" }
 itertools = "0.14"
 jsonwebtoken = "9.3.1"
 kzg = { git = "https://github.com/grandinetech/rust-kzg" }
 lazy_static = "1.5.0"
+leansig = { git = "https://github.com/leanEthereum/leanSig.git", rev = "f10dcbefac2502d356d93f686e8b4ecd8dc8840a" }
 libp2p = { version = "0.56", default-features = false, features = ["identify", "yamux", "noise", "dns", "serde", "tcp", "tokio", "plaintext", "secp256k1", "macros", "ecdsa", "metrics", "quic", "upnp", "gossipsub", "ping"] }
 libp2p-identity = "0.2.12"
 libp2p-mplex = "0.43.1"
@@ -110,7 +112,7 @@ prometheus_exporter = { git = "https://github.com/AlexanderThaller/prometheus_ex
 rand = "0.9"
 rand_chacha = "0.9"
 redb = "3.1.0"
-reqwest = { version = "0.12.24", features = ["json"] }
+reqwest = { version = "0.12.24", features = ["native-tls-vendored", "json"] }
 rstest = "0.26.1"
 rust-kzg-blst = { git = 'https://github.com/grandinetech/rust-kzg.git' }
 serde = { version = '1.0', features = ['derive', "rc"] }
@@ -118,7 +120,7 @@ serde_json = "1.0.145"
 serde_yaml = "0.9"
 sha2 = "0.10.9"
 snap = "1.1"
-ssz_types = { git = "https://github.com/ReamLabs/ssz_types", branch = "removable-variable-list" }
+ssz_types = { git = "https://github.com/sigp/ssz_types.git", rev = "5dc2d521ed31f8e38b0065a80bf98af55aac06f8" }
 tempdir = "0.3.7"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
@@ -127,8 +129,8 @@ tokio-util = { version = "0.7.16", features = ["compat"] }
 tracing = "0.1"
 tracing-subscriber = "0.3.20"
 tracing-test = "0.2.5"
-tree_hash = "0.10"
-tree_hash_derive = "0.11.0"
+tree_hash = "0.12"
+tree_hash_derive = "0.12"
 unicode-normalization = "0.1.24"
 url = "2.5.7"
 
@@ -155,9 +157,11 @@ ream-merkle = { path = "crates/crypto/merkle" }
 ream-metrics = { path = "crates/common/metrics" }
 ream-network-manager = { path = "crates/networking/manager" }
 ream-network-spec = { path = "crates/common/network_spec" }
+ream-network-state-lean = { path = "crates/networking/network_state/lean" }
 ream-node = { path = "crates/common/node" }
 ream-operation-pool = { path = "crates/common/operation_pool" }
 ream-p2p = { path = "crates/networking/p2p" }
+ream-peer = { path = "crates/networking/peer" }
 ream-polynomial-commitments = { path = "crates/common/polynomial_commitments" }
 ream-post-quantum-crypto = { path = "crates/crypto/post_quantum" }
 ream-rpc-beacon = { path = "crates/rpc/beacon" }
@@ -171,3 +175,6 @@ ream-validator-lean = { path = "crates/common/validator/lean" }
 
 [patch.crates-io]
 ethereum_hashing = { git = "https://github.com/ReamLabs/ethereum_hashing.git" }
+
+[profile.test]
+inherits = "release"

@@ -15,11 +15,11 @@ lean-spec-tests = []
 [dependencies]
 alloy-primitives.workspace = true
 anyhow.workspace = true
-hex = "0.4"
 serde.workspace = true
 serde_json.workspace = true
 ssz_types.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 tree_hash.workspace = true
 
 # ream dependencies
@@ -29,6 +29,9 @@ ream-fork-choice-lean.workspace = true
 ream-network-spec.workspace = true
 ream-post-quantum-crypto.workspace = true
 ream-storage.workspace = true
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [lints]
 workspace = true
