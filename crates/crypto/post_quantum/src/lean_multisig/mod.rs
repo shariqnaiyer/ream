@@ -1,3 +1,4 @@
+pub mod aggregate;
 pub mod errors;
 pub mod private_key;
 pub mod public_key;
