@@ -6,6 +6,7 @@ use lean_multisig::{
 };
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
+use tree_hash::TreeHash;
 
 use super::errors::LeanMultisigError;
 use crate::leansig::{public_key::PublicKey, signature::Signature};
@@ -20,6 +21,43 @@ pub struct AggregateSignature {
     pub proof_bytes: Vec<u8>,
     /// Encoding randomness for each signature
     pub encoding_randomness: Vec<Vec<u8>>,
+}
+
+impl TreeHash for AggregateSignature {
+    fn tree_hash_type() -> tree_hash::TreeHashType {
+        tree_hash::TreeHashType::Container
+    }
+
+    fn tree_hash_packed_encoding(&self) -> tree_hash::PackedEncoding {
+        unreachable!("Struct should never be packed.")
+    }
+
+    fn tree_hash_packing_factor() -> usize {
+        unreachable!("Struct should never be packed.")
+    }
+
+    fn tree_hash_root(&self) -> tree_hash::Hash256 {
+        let mut hasher = tree_hash::MerkleHasher::with_leaves(2);
+
+        // Hash proof_bytes as a list - compute SSZ hash for variable-length list
+        let proof_hash = tree_hash::merkle_root(&self.proof_bytes, 0);
+        hasher
+            .write(proof_hash.as_ref())
+            .expect("proof_bytes tree hash should succeed");
+
+        // Hash encoding_randomness as a list of lists
+        // First flatten to compute the hash
+        let mut encoding_bytes = Vec::new();
+        for randomness in &self.encoding_randomness {
+            encoding_bytes.extend_from_slice(randomness);
+        }
+        let encoding_hash = tree_hash::merkle_root(&encoding_bytes, 0);
+        hasher
+            .write(encoding_hash.as_ref())
+            .expect("encoding_randomness tree hash should succeed");
+
+        hasher.finish().expect("hasher should produce root")
+    }
 }
 
 impl AggregateSignature {
