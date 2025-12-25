@@ -404,7 +404,7 @@ pub static SEPOLIA: LazyLock<Arc<BeaconNetworkSpec>> = LazyLock::new(|| {
         electra_fork_version: fixed_bytes!("0x90000074"),
         electra_fork_epoch: 222464,
         fulu_fork_version: fixed_bytes!("0x90000075"),
-        fulu_fork_epoch: 272640,
+        fulu_fork_epoch: 18446744073709551615, // Disable Fulu - stay on Electra
         seconds_per_slot: 12,
         seconds_per_eth1_block: 14,
         min_validator_withdrawability_delay: 256,

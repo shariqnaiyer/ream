@@ -15,9 +15,11 @@ use ream_p2p::{
     },
     network::beacon::channel::GossipMessage,
 };
-use ream_storage::{cache::BeaconCacheDB, tables::table::CustomTable};
+use ream_storage::{cache::BeaconCacheDB, tables::table::{CustomTable, REDBTable}};
 use ream_validator_beacon::{
-    blob_sidecars::compute_subnet_for_blob_sidecar, constants::SYNC_COMMITTEE_SUBNET_COUNT,
+    blob_sidecars::compute_subnet_for_blob_sidecar,
+    constants::SYNC_COMMITTEE_SUBNET_COUNT,
+    sync_committee::compute_index_in_subcommittee,
 };
 use ssz::Encode;
 use tracing::{error, info, trace, warn};
@@ -275,6 +277,66 @@ pub async fn handle_gossipsub_message(
                 {
                     Ok(validation_result) => match validation_result {
                         ValidationResult::Accept => {
+                            // Get the state to compute index_in_subcommittee
+                            let store = beacon_chain.store.lock().await;
+                            match store.get_head() {
+                                Ok(head_root) => {
+                                    match store.db.state_provider().get(head_root) {
+                                        Ok(Some(state)) => {
+                                            // Calculate the validator's index within the subcommittee
+                                            match compute_index_in_subcommittee(
+                                                &state,
+                                                sync_committee.validator_index,
+                                                subnet_id,
+                                            ) {
+                                                Ok(Some(index_in_subcommittee)) => {
+                                                    // Aggregate the message into the pool
+                                                    store.sync_committee_pool.aggregate_messages(
+                                                        sync_committee.slot,
+                                                        sync_committee.beacon_block_root,
+                                                        subnet_id,
+                                                        vec![(*sync_committee.clone(), index_in_subcommittee)],
+                                                    );
+
+                                                    info!(
+                                                        "Aggregated sync committee message from validator {} (index_in_subcommittee: {}) for slot {} subnet {}",
+                                                        sync_committee.validator_index,
+                                                        index_in_subcommittee,
+                                                        sync_committee.slot,
+                                                        subnet_id
+                                                    );
+                                                }
+                                                Ok(None) => {
+                                                    warn!(
+                                                        "Validator {} not found in subcommittee {} - this should have been caught in validation",
+                                                        sync_committee.validator_index,
+                                                        subnet_id
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    error!(
+                                                        "Failed to compute index_in_subcommittee for validator {}: {:?}",
+                                                        sync_committee.validator_index,
+                                                        err
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Ok(None) => {
+                                            error!("No beacon state found for head root: {}", head_root);
+                                        }
+                                        Err(err) => {
+                                            error!("Failed to get beacon state: {:?}", err);
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    error!("Failed to get head root: {:?}", err);
+                                }
+                            }
+                            drop(store);
+
+                            // Propagate the message
                             p2p_sender.send_gossip(GossipMessage {
                                 topic: GossipTopic::from_topic_hash(&message.topic)
                                     .expect("invalid topic hash"),

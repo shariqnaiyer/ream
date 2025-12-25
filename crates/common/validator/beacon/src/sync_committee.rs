@@ -109,6 +109,57 @@ pub fn compute_subnets_for_sync_committee(
         .collect())
 }
 
+/// Computes the index of a validator within their subcommittee (0-127).
+///
+/// Returns the position of the validator within the specified subcommittee.
+/// If the validator is not in the given subcommittee, returns None.
+///
+/// # Arguments
+/// * `state` - The beacon state
+/// * `validator_index` - The global validator index
+/// * `subcommittee_index` - The subcommittee to check (0-3)
+///
+/// # Returns
+/// The index within the subcommittee (0-127) if the validator is in that subcommittee, None otherwise
+pub fn compute_index_in_subcommittee(
+    state: &BeaconState,
+    validator_index: u64,
+    subcommittee_index: u64,
+) -> anyhow::Result<Option<usize>> {
+    let next_slot_epoch = compute_epoch_at_slot(state.slot + 1);
+    let sync_committee = if compute_sync_committee_period(state.get_current_epoch())
+        == compute_sync_committee_period(next_slot_epoch)
+    {
+        &state.current_sync_committee
+    } else {
+        &state.next_sync_committee
+    };
+
+    let Some(target_validator) = state.validators.get(validator_index as usize) else {
+        bail!("Validator index out of bounds: {validator_index}");
+    };
+
+    let sync_subcommittee_size = SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT;
+    let subcommittee_start = (subcommittee_index * sync_subcommittee_size) as usize;
+
+    // Find the first occurrence of this validator in the specified subcommittee range
+    for (global_index, public_key) in sync_committee
+        .public_keys
+        .iter()
+        .enumerate()
+        .skip(subcommittee_start)
+        .take(sync_subcommittee_size as usize)
+    {
+        if *public_key == target_validator.public_key {
+            // Calculate the index within the subcommittee (0-127)
+            let index_in_subcommittee = global_index - subcommittee_start;
+            return Ok(Some(index_in_subcommittee));
+        }
+    }
+
+    Ok(None)
+}
+
 pub fn process_sync_committee_contributions(
     block: &mut BeaconBlock,
     contributions: HashSet<SyncCommitteeContribution>,

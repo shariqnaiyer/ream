@@ -105,17 +105,19 @@ pub async fn initialize_db_from_checkpoint(
 }
 
 /// Fetch initial state from trusted RPC
-async fn get_state(rpc: &Url, slot: u64) -> anyhow::Result<BeaconState> {
+async fn get_state(rpc: &Url, _slot: u64) -> anyhow::Result<BeaconState> {
     let client = reqwest::Client::new();
-    let state = client
-        .get(format!("{rpc}eth/v2/debug/beacon/states/{slot}"))
+
+    // Try finalized state first (more reliable)
+    let state_bytes = client
+        .get(format!("{rpc}eth/v2/debug/beacon/states/finalized"))
         .header(ACCEPT, HeaderValue::from_static("application/octet-stream"))
         .send()
         .await?
         .bytes()
         .await?;
 
-    BeaconState::from_ssz_bytes(&state)
+    BeaconState::from_ssz_bytes(&state_bytes)
         .map_err(|err| anyhow!("Unable to decode state from ssz bytes: {err:?}"))
 }
 
@@ -145,21 +147,33 @@ async fn initialize_blobs_in_db(
     store: BeaconDB,
     beacon_block_root: B256,
 ) -> anyhow::Result<()> {
-    let blob_sidecar = reqwest::get(&format!(
+    // Try to fetch blobs, but don't fail if they're not available
+    match reqwest::get(&format!(
         "{rpc}eth/v1/beacon/blob_sidecars/{beacon_block_root}"
     ))
-    .await?
-    .json::<BlobSidercars>()
-    .await?;
-
-    for blob_sidecar in blob_sidecar.data {
-        store.blobs_and_proofs_provider().insert(
-            BlobIdentifier::new(beacon_block_root, blob_sidecar.index),
-            BlobAndProofV1 {
-                blob: blob_sidecar.blob,
-                proof: blob_sidecar.kzg_proof,
-            },
-        )?;
+    .await
+    {
+        Ok(response) => {
+            match response.json::<BlobSidercars>().await {
+                Ok(blob_sidecar) => {
+                    for blob_sidecar in blob_sidecar.data {
+                        store.blobs_and_proofs_provider().insert(
+                            BlobIdentifier::new(beacon_block_root, blob_sidecar.index),
+                            BlobAndProofV1 {
+                                blob: blob_sidecar.blob,
+                                proof: blob_sidecar.kzg_proof,
+                            },
+                        )?;
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to parse blob sidecars (might not be available): {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to fetch blob sidecars (might not exist for this block): {}", e);
+        }
     }
     Ok(())
 }
