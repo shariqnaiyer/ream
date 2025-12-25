@@ -1,5 +1,6 @@
 pub mod fork_choice;
 pub mod state_transition;
+pub mod verify_signatures;
 
 use std::collections::HashMap;
 
@@ -98,11 +99,18 @@ pub struct AggregatedAttestationJSON {
     pub message: AttestationData,
 }
 
-/// Attestation
+/// Attestation - supports both aggregate and single-validator formats
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Attestation {
+    /// Single-validator attestation: validator ID
     #[serde(alias = "validatorId")]
-    pub validator_id: u64,
+    #[serde(default)]
+    pub validator_id: Option<u64>,
+    /// Aggregate attestation: aggregation bits showing which validators participated
+    #[serde(default)]
+    pub aggregation_bits: Option<DataList<bool>>,
+    /// Attestation data (common to both formats)
     pub data: AttestationData,
 }
 
@@ -190,11 +198,34 @@ impl TryFrom<&Validator> for ReamValidator {
     }
 }
 
-impl From<&Attestation> for ReamAttestation {
-    fn from(attestation: &Attestation) -> Self {
-        ReamAttestation {
-            validator_id: attestation.validator_id,
-            data: attestation.data.clone(),
+impl Attestation {
+    /// Convert to a list of ream attestations.
+    /// - For single-validator attestations: returns a single attestation
+    /// - For aggregate attestations: expands into individual attestations based on aggregation_bits
+    pub fn to_ream_attestations(&self) -> anyhow::Result<Vec<ReamAttestation>> {
+        match (&self.validator_id, &self.aggregation_bits) {
+            // Single-validator attestation
+            (Some(validator_id), None) => Ok(vec![ReamAttestation {
+                validator_id: *validator_id,
+                data: self.data.clone(),
+            }]),
+            // Aggregate attestation - expand based on aggregation bits
+            (None, Some(aggregation_bits)) => {
+                let mut attestations = Vec::new();
+                for (validator_index, &participated) in aggregation_bits.data.iter().enumerate() {
+                    if participated {
+                        attestations.push(ReamAttestation {
+                            validator_id: validator_index as u64,
+                            data: self.data.clone(),
+                        });
+                    }
+                }
+                Ok(attestations)
+            }
+            // Invalid: both or neither field present
+            _ => bail!(
+                "Attestation must have either validator_id or aggregation_bits, not both or neither"
+            ),
         }
     }
 }
@@ -205,13 +236,25 @@ impl TryFrom<&Block> for ReamBlock {
     fn try_from(block: &Block) -> anyhow::Result<Self> {
         #[cfg(feature = "devnet1")]
         let attestations = {
-            let list: Vec<ReamAttestation> = block
-                .body
-                .attestations
-                .data
-                .iter()
-                .map(ReamAttestation::from)
-                .collect();
+            let mut list = Vec::new();
+            for attestation in &block.body.attestations.data {
+                // For devnet1, take the first validator from aggregate attestations
+                // or use the validator_id from single-validator attestations
+                let validator_id = if let Some(vid) = attestation.validator_id {
+                    vid
+                } else if let Some(agg_bits) = &attestation.aggregation_bits {
+                    // Take the first participating validator
+                    agg_bits.data.iter().position(|&b| b).ok_or_else(|| {
+                        anyhow!("Aggregate attestation has no participating validators")
+                    })? as u64
+                } else {
+                    bail!("Attestation must have either validator_id or aggregation_bits");
+                };
+                list.push(ReamAttestation {
+                    validator_id,
+                    data: attestation.data.clone(),
+                });
+            }
             VariableList::try_from(list)
                 .map_err(|err| anyhow!("Failed to create attestations VariableList: {err}"))?
         };
