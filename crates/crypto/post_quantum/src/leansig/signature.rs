@@ -7,6 +7,7 @@ use tree_hash_derive::TreeHash;
 
 use crate::leansig::{LeanSigScheme, errors::LeanSigError, public_key::PublicKey};
 
+// Using PROD config (3112 bytes)
 const SIGNATURE_SIZE: usize = 3112;
 
 type LeanSigSignature = <LeanSigScheme as SignatureScheme>::Signature;
@@ -51,12 +52,19 @@ impl Signature {
         epoch: u32,
         message: &[u8; MESSAGE_LENGTH],
     ) -> anyhow::Result<bool> {
-        Ok(<LeanSigScheme as SignatureScheme>::verify(
+        tracing::debug!(
+            "Signature::verify called with epoch={}, message={}",
+            epoch,
+            alloy_primitives::hex::encode(message)
+        );
+        let result = <LeanSigScheme as SignatureScheme>::verify(
             &public_key.as_lean_sig()?,
             epoch,
             message,
             &self.as_lean_sig()?,
-        ))
+        );
+        tracing::debug!("Signature::verify result: {}", result);
+        Ok(result)
     }
 }
 
