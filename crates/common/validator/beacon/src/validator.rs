@@ -18,7 +18,7 @@ use ream_api_types_beacon::{
 use ream_api_types_common::id::ID;
 use ream_bls::{BLSSignature, PublicKey, traits::Signable};
 use ream_consensus_beacon::{
-    electra::beacon_state::BeaconState, single_attestation::SingleAttestation,
+    fulu::beacon_state::BeaconState, single_attestation::SingleAttestation,
 };
 use ream_consensus_misc::{
     attestation_data::AttestationData,

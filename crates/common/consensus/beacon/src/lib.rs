@@ -7,6 +7,7 @@ pub mod blob_sidecar;
 pub mod bls_to_execution_change;
 pub mod data_column_sidecar;
 pub mod electra;
+pub mod fulu;
 pub mod eth_1_block;
 pub mod fork_choice;
 pub mod genesis;

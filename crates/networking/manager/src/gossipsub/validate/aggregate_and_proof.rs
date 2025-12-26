@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use ream_bls::{PublicKey, traits::Verifiable};
 use ream_chain_beacon::beacon_chain::BeaconChain;
-use ream_consensus_beacon::electra::beacon_state::BeaconState;
+use ream_consensus_beacon::fulu::beacon_state::BeaconState;
 use ream_consensus_misc::{
     constants::beacon::{
         ATTESTATION_PROPAGATION_SLOT_RANGE, DOMAIN_AGGREGATE_AND_PROOF, DOMAIN_BEACON_ATTESTER,

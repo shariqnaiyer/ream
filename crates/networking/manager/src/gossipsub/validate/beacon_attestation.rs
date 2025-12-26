@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use ream_bls::traits::Verifiable;
 use ream_chain_beacon::beacon_chain::BeaconChain;
 use ream_consensus_beacon::{
-    electra::beacon_state::BeaconState, single_attestation::SingleAttestation,
+    fulu::beacon_state::BeaconState, single_attestation::SingleAttestation,
 };
 use ream_consensus_misc::{
     constants::beacon::DOMAIN_BEACON_ATTESTER,

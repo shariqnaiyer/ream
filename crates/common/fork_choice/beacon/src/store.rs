@@ -8,7 +8,7 @@ use ream_consensus_beacon::{
     attestation::Attestation,
     blob_sidecar::BlobIdentifier,
     data_column_sidecar::{ColumnIdentifier, DataColumnSidecar, NUMBER_OF_COLUMNS},
-    electra::{
+    fulu::{
         beacon_block::{BeaconBlock, SignedBeaconBlock},
         beacon_state::BeaconState,
     },

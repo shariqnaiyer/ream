@@ -2,7 +2,7 @@ use alloy_primitives::{B256, map::HashSet};
 use anyhow::{anyhow, ensure};
 use ream_consensus_beacon::{
     attestation::Attestation, attester_slashing::AttesterSlashing,
-    electra::beacon_block::SignedBeaconBlock, predicates::is_slashable_attestation_data,
+    fulu::beacon_block::SignedBeaconBlock, predicates::is_slashable_attestation_data,
 };
 use ream_consensus_misc::{
     constants::beacon::INTERVALS_PER_SLOT, misc::compute_start_slot_at_epoch,

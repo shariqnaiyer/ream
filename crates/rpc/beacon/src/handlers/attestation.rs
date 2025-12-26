@@ -7,7 +7,7 @@ use ream_api_types_beacon::{
     rewards::{AttestationRewardsData, AttestationRewardsResponse, IdealReward, TotalReward},
 };
 use ream_api_types_common::{error::ApiError, id::ID};
-use ream_consensus_beacon::electra::beacon_state::BeaconState;
+use ream_consensus_beacon::fulu::beacon_state::BeaconState;
 use ream_consensus_misc::constants::beacon::{
     EFFECTIVE_BALANCE_INCREMENT, GENESIS_EPOCH, PARTICIPATION_FLAG_WEIGHTS, SLOTS_PER_EPOCH,
     TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR,

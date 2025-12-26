@@ -6,7 +6,7 @@ use ream_bls::{
     signature::BLSSignature,
     traits::{Aggregatable, Signable},
 };
-use ream_consensus_beacon::{attestation::Attestation, electra::beacon_state::BeaconState};
+use ream_consensus_beacon::{attestation::Attestation, fulu::beacon_state::BeaconState};
 use ream_consensus_misc::{
     attestation_data::AttestationData,
     constants::beacon::{

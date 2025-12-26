@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ream_consensus_beacon::electra::beacon_state::BeaconState;
+use ream_consensus_beacon::fulu::beacon_state::BeaconState;
 use ream_consensus_misc::checkpoint::Checkpoint;
 use redb::{Database, TableDefinition};
 

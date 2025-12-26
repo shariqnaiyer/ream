@@ -1,5 +1,5 @@
 use alloy_primitives::B256;
-use ream_consensus_beacon::electra::beacon_block::SignedBeaconBlock;
+use ream_consensus_beacon::fulu::beacon_block::SignedBeaconBlock;
 use ream_consensus_misc::checkpoint::Checkpoint;
 use serde::{Deserialize, Serialize};
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use alloy_primitives::B256;
-use ream_consensus_beacon::electra::beacon_state::BeaconState;
+use ream_consensus_beacon::fulu::beacon_state::BeaconState;
 use redb::{Database, ReadableDatabase, TableDefinition};
 
 use crate::{

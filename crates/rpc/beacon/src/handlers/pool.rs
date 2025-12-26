@@ -13,7 +13,7 @@ use ream_bls::traits::Verifiable;
 use ream_chain_beacon::beacon_chain::BeaconChain;
 use ream_consensus_beacon::{
     attestation::Attestation, attester_slashing::AttesterSlashing,
-    bls_to_execution_change::SignedBLSToExecutionChange, electra::beacon_state::BeaconState,
+    bls_to_execution_change::SignedBLSToExecutionChange, fulu::beacon_state::BeaconState,
     proposer_slashing::ProposerSlashing, single_attestation::SingleAttestation,
     voluntary_exit::SignedVoluntaryExit,
 };
@@ -344,7 +344,7 @@ pub async fn get_attestations(
 
 fn convert_single_to_attestation(
     single: &SingleAttestation,
-    state: &ream_consensus_beacon::electra::beacon_state::BeaconState,
+    state: &ream_consensus_beacon::fulu::beacon_state::BeaconState,
 ) -> Result<Attestation, String> {
     let committee = state
         .get_beacon_committee(single.data.slot, single.committee_index)

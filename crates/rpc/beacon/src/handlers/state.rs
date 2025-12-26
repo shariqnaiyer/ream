@@ -8,7 +8,7 @@ use ream_api_types_beacon::{
     responses::{BeaconResponse, BeaconVersionedResponse},
 };
 use ream_api_types_common::{error::ApiError, id::ID};
-use ream_consensus_beacon::electra::beacon_state::BeaconState;
+use ream_consensus_beacon::fulu::beacon_state::BeaconState;
 use ream_consensus_misc::{
     checkpoint::Checkpoint, constants::beacon::SYNC_COMMITTEE_SIZE,
     misc::compute_sync_committee_period,

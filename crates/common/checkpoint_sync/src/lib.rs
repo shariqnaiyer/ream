@@ -6,8 +6,9 @@ use anyhow::{anyhow, ensure};
 use checkpoint::get_checkpoint_sync_sources;
 use ream_consensus_beacon::{
     blob_sidecar::{BlobIdentifier, BlobSidecar},
-    electra::{beacon_block::SignedBeaconBlock, beacon_state::BeaconState},
+    fulu::{beacon_block::SignedBeaconBlock, beacon_state::BeaconState},
 };
+use ream_consensus_misc::misc::compute_epoch_at_slot;
 use ream_consensus_misc::checkpoint::Checkpoint;
 use ream_execution_rpc_types::get_blobs::BlobAndProofV1;
 use ream_fork_choice_beacon::{handlers::on_tick, store::get_forkchoice_store};
@@ -70,11 +71,16 @@ pub async fn initialize_db_from_checkpoint(
     let slot = block.message.slot;
 
     info!("Fetching blobs...");
-    initialize_blobs_in_db(&checkpoint_sync_url, db.clone(), block.message.block_root()).await?;
-    info!(
-        "Downloaded blobs for block: {}",
-        block.message.body.execution_payload.block_number
-    );
+    match initialize_blobs_in_db(&checkpoint_sync_url, db.clone(), block.message.block_root()).await {
+        Ok(_) => info!(
+            "Downloaded blobs for block: {}",
+            block.message.body.execution_payload.block_number
+        ),
+        Err(e) => warn!(
+            "Failed to fetch blobs for block {} (this is expected if blobs have expired): {e}",
+            block.message.body.execution_payload.block_number
+        ),
+    }
 
     info!("Fetching initial state...");
     let state = get_state(&checkpoint_sync_url, slot).await?;
@@ -105,20 +111,28 @@ pub async fn initialize_db_from_checkpoint(
 }
 
 /// Fetch initial state from trusted RPC
-async fn get_state(rpc: &Url, _slot: u64) -> anyhow::Result<BeaconState> {
+async fn get_state(rpc: &Url, slot: u64) -> anyhow::Result<BeaconState> {
     let client = reqwest::Client::new();
-
-    // Try finalized state first (more reliable)
     let state_bytes = client
-        .get(format!("{rpc}eth/v2/debug/beacon/states/finalized"))
+        .get(format!("{rpc}eth/v2/debug/beacon/states/{slot}"))
         .header(ACCEPT, HeaderValue::from_static("application/octet-stream"))
         .send()
         .await?
         .bytes()
         .await?;
 
-    BeaconState::from_ssz_bytes(&state_bytes)
-        .map_err(|err| anyhow!("Unable to decode state from ssz bytes: {err:?}"))
+    // Determine fork based on slot
+    let epoch = compute_epoch_at_slot(slot);
+    let network_spec = beacon_network_spec();
+
+    if epoch >= network_spec.fulu_fork_epoch {
+        // Fulu fork
+        info!("Decoding state as Fulu fork (epoch: {epoch}, fulu_fork_epoch: {})", network_spec.fulu_fork_epoch);
+        BeaconState::from_ssz_bytes(&state_bytes)
+            .map_err(|err| anyhow!("Unable to decode Fulu state from ssz bytes: {err:?}"))
+    } else {
+        Err(anyhow!("Checkpoint sync only supports Fulu fork. Current epoch: {epoch}"))
+    }
 }
 
 /// Fetch initial block from trusted RPC
@@ -147,33 +161,21 @@ async fn initialize_blobs_in_db(
     store: BeaconDB,
     beacon_block_root: B256,
 ) -> anyhow::Result<()> {
-    // Try to fetch blobs, but don't fail if they're not available
-    match reqwest::get(&format!(
+    let blob_sidecar = reqwest::get(&format!(
         "{rpc}eth/v1/beacon/blob_sidecars/{beacon_block_root}"
     ))
-    .await
-    {
-        Ok(response) => {
-            match response.json::<BlobSidercars>().await {
-                Ok(blob_sidecar) => {
-                    for blob_sidecar in blob_sidecar.data {
-                        store.blobs_and_proofs_provider().insert(
-                            BlobIdentifier::new(beacon_block_root, blob_sidecar.index),
-                            BlobAndProofV1 {
-                                blob: blob_sidecar.blob,
-                                proof: blob_sidecar.kzg_proof,
-                            },
-                        )?;
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to parse blob sidecars (might not be available): {}", e);
-                }
-            }
-        }
-        Err(e) => {
-            warn!("Failed to fetch blob sidecars (might not exist for this block): {}", e);
-        }
+    .await?
+    .json::<BlobSidercars>()
+    .await?;
+
+    for blob_sidecar in blob_sidecar.data {
+        store.blobs_and_proofs_provider().insert(
+            BlobIdentifier::new(beacon_block_root, blob_sidecar.index),
+            BlobAndProofV1 {
+                blob: blob_sidecar.blob,
+                proof: blob_sidecar.kzg_proof,
+            },
+        )?;
     }
     Ok(())
 }

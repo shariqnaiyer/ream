@@ -21,7 +21,7 @@ use ream_consensus_beacon::{
     attester_slashing::AttesterSlashing,
     beacon_committee_selection::BeaconCommitteeSelection,
     bls_to_execution_change::SignedBLSToExecutionChange,
-    electra::{
+    fulu::{
         beacon_block::BeaconBlock, beacon_block_body::BeaconBlockBody, beacon_state::BeaconState,
         blinded_beacon_block::BlindedBeaconBlock,
         blinded_beacon_block_body::BlindedBeaconBlockBody,

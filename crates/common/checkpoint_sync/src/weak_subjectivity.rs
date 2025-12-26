@@ -1,5 +1,5 @@
 use anyhow::ensure;
-use ream_consensus_beacon::electra::beacon_state::BeaconState;
+use ream_consensus_beacon::fulu::beacon_state::BeaconState;
 use ream_consensus_misc::{checkpoint::Checkpoint, misc::compute_epoch_at_slot};
 use ream_fork_choice_beacon::store::Store;
 

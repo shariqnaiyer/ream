@@ -1,6 +1,6 @@
 use alloy_primitives::{Address, B256, Bytes};
 use anyhow::{anyhow, bail, ensure};
-use ream_consensus_beacon::electra::beacon_state::BeaconState;
+use ream_consensus_beacon::fulu::beacon_state::BeaconState;
 use ream_consensus_misc::{
     consolidation_request::ConsolidationRequest,
     constants::beacon::{

@@ -1,5 +1,5 @@
 use ream_bls::{BLSSignature, PrivateKey, traits::Signable};
-use ream_consensus_beacon::electra::{
+use ream_consensus_beacon::fulu::{
     beacon_block::{BeaconBlock, SignedBeaconBlock},
     beacon_state::BeaconState,
     blinded_beacon_block::{BlindedBeaconBlock, SignedBlindedBeaconBlock},

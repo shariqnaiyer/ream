@@ -4,7 +4,7 @@ use alloy_primitives::B256;
 use anyhow::{Ok, anyhow};
 use ream_api_types_beacon::responses::{ETH_CONSENSUS_VERSION_HEADER, VERSION};
 use ream_bls::PublicKey;
-use ream_consensus_beacon::electra::blinded_beacon_block::SignedBlindedBeaconBlock;
+use ream_consensus_beacon::fulu::blinded_beacon_block::SignedBlindedBeaconBlock;
 use reqwest::StatusCode;
 use url::Url;
 

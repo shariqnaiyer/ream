@@ -2,7 +2,7 @@ use libp2p::gossipsub::TopicHash;
 use ream_consensus_beacon::{
     attester_slashing::AttesterSlashing, blob_sidecar::BlobSidecar,
     bls_to_execution_change::SignedBLSToExecutionChange, data_column_sidecar::DataColumnSidecar,
-    electra::beacon_block::SignedBeaconBlock, proposer_slashing::ProposerSlashing,
+    fulu::beacon_block::SignedBeaconBlock, proposer_slashing::ProposerSlashing,
     single_attestation::SingleAttestation, voluntary_exit::SignedVoluntaryExit,
 };
 use ream_consensus_misc::constants::beacon::genesis_validators_root;

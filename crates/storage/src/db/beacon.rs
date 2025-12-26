@@ -1,7 +1,7 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use anyhow::anyhow;
-use ream_consensus_beacon::electra::beacon_state::BeaconState;
+use ream_consensus_beacon::fulu::beacon_state::BeaconState;
 use ream_consensus_misc::constants::beacon::SLOTS_PER_EPOCH;
 use redb::{Database, ReadableDatabase};
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::bail;
 use ream_consensus_beacon::{
     attestation::Attestation, attester_slashing::AttesterSlashing,
-    electra::beacon_block::SignedBeaconBlock,
+    fulu::beacon_block::SignedBeaconBlock,
 };
 use ream_consensus_misc::constants::beacon::genesis_validators_root;
 use ream_events_beacon::{BeaconEvent, BeaconEventSender, event::chain::BlockEvent};

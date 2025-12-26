@@ -5,7 +5,7 @@ use lru::LruCache;
 use ream_bls::{BLSSignature, PublicKey};
 use ream_consensus_beacon::{
     bls_to_execution_change::BLSToExecutionChange,
-    electra::{beacon_block::SignedBeaconBlock, beacon_state::BeaconState},
+    fulu::{beacon_block::SignedBeaconBlock, beacon_state::BeaconState},
 };
 use ream_consensus_lean::{block::SignedBlockWithAttestation, state::LeanState};
 use ream_consensus_misc::constants::beacon::SYNC_COMMITTEE_SIZE;

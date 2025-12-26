@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use anyhow::anyhow;
 use ream_chain_beacon::beacon_chain::BeaconChain;
 use ream_consensus_beacon::{
-    attester_slashing::AttesterSlashing, electra::beacon_state::BeaconState,
+    attester_slashing::AttesterSlashing, fulu::beacon_state::BeaconState,
 };
 use ream_storage::{cache::BeaconCacheDB, tables::table::REDBTable};
 

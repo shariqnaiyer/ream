@@ -15,7 +15,7 @@ use futures::{
 use libp2p::{OutboundUpgrade, bytes::Buf, core::UpgradeInfo};
 use ream_consensus_beacon::{
     blob_sidecar::BlobSidecar, data_column_sidecar::DataColumnSidecar,
-    electra::beacon_block::SignedBeaconBlock,
+    fulu::beacon_block::SignedBeaconBlock,
 };
 use ream_consensus_lean::block::SignedBlockWithAttestation;
 use ream_consensus_misc::constants::beacon::genesis_validators_root;

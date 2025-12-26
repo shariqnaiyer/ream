@@ -1,4 +1,4 @@
-use ream_consensus_beacon::electra::{
+use ream_consensus_beacon::fulu::{
     beacon_block::BeaconBlock, blinded_beacon_block::BlindedBeaconBlock,
 };
 use ream_consensus_misc::polynomial_commitments::kzg_proof::KZGProof;

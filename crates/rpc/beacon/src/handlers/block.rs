@@ -17,7 +17,7 @@ use ream_api_types_beacon::{
 use ream_api_types_common::{error::ApiError, id::ID};
 use ream_chain_beacon::beacon_chain::BeaconChain;
 use ream_consensus_beacon::{
-    electra::{
+    fulu::{
         beacon_block::{BeaconBlock, SignedBeaconBlock},
         beacon_block_body::BeaconBlockBody,
         beacon_state::BeaconState,

@@ -84,7 +84,7 @@ impl SignedBeaconBlock {
                 proposer_index: self.message.proposer_index,
                 parent_root: self.message.parent_root,
                 state_root: self.message.state_root,
-                body: super::blinded_beacon_block_body::BlindedBeaconBlockBody {
+                body: BlindedBeaconBlockBody {
                     randao_reveal: self.message.body.randao_reveal.clone(),
                     eth1_data: self.message.body.eth1_data.clone(),
                     graffiti: self.message.body.graffiti,

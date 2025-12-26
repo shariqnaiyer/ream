@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use ream_chain_beacon::beacon_chain::BeaconChain;
 use ream_consensus_beacon::{
-    electra::beacon_state::BeaconState, proposer_slashing::ProposerSlashing,
+    fulu::beacon_state::BeaconState, proposer_slashing::ProposerSlashing,
 };
 use ream_storage::{cache::BeaconCacheDB, tables::table::REDBTable};
 

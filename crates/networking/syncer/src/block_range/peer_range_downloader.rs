@@ -3,7 +3,7 @@ use anyhow::bail;
 use libp2p::PeerId;
 use ream_consensus_beacon::{
     blob_sidecar::{BlobIdentifier, BlobSidecar},
-    electra::beacon_block::SignedBeaconBlock,
+    fulu::beacon_block::SignedBeaconBlock,
 };
 use ream_executor::ReamExecutor;
 use ream_p2p::{

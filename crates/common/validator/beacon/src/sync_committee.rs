@@ -7,7 +7,7 @@ use ream_bls::{
     traits::{Aggregatable, Signable},
 };
 use ream_consensus_beacon::{
-    electra::{beacon_block::BeaconBlock, beacon_state::BeaconState},
+    fulu::{beacon_block::BeaconBlock, beacon_state::BeaconState},
     sync_aggregate::SyncAggregate,
 };
 use ream_consensus_misc::{

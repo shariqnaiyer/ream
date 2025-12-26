@@ -4,7 +4,7 @@ use alloy_primitives::B256;
 use anyhow::{bail, ensure};
 use ream_consensus_beacon::{
     blob_sidecar::{BlobIdentifier, BlobSidecar},
-    electra::beacon_block::SignedBeaconBlock,
+    fulu::beacon_block::SignedBeaconBlock,
 };
 use ream_network_spec::networks::beacon_network_spec;
 use ssz::Encode;

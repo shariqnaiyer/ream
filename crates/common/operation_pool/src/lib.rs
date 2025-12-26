@@ -4,7 +4,7 @@ use alloy_primitives::{Address, B256, map::HashSet};
 use parking_lot::RwLock;
 use ream_consensus_beacon::{
     attestation::Attestation, attester_slashing::AttesterSlashing,
-    bls_to_execution_change::SignedBLSToExecutionChange, electra::beacon_state::BeaconState,
+    bls_to_execution_change::SignedBLSToExecutionChange, fulu::beacon_state::BeaconState,
     proposer_slashing::ProposerSlashing, sync_aggregate::SyncAggregate,
     voluntary_exit::SignedVoluntaryExit,
 };

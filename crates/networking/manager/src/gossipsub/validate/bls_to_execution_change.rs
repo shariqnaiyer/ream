@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use ream_chain_beacon::beacon_chain::BeaconChain;
 use ream_consensus_beacon::{
-    bls_to_execution_change::SignedBLSToExecutionChange, electra::beacon_state::BeaconState,
+    bls_to_execution_change::SignedBLSToExecutionChange, fulu::beacon_state::BeaconState,
 };
 use ream_network_spec::networks::beacon_network_spec;
 use ream_storage::{

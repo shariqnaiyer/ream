@@ -1,6 +1,6 @@
 use alloy_primitives::B256;
 use anyhow::anyhow;
-use ream_consensus_beacon::electra::beacon_block::SignedBeaconBlock;
+use ream_consensus_beacon::fulu::beacon_block::SignedBeaconBlock;
 use ream_consensus_misc::beacon_block_header::BeaconBlockHeader;
 use ream_execution_rpc_types::electra::execution_payload_header::ExecutionPayloadHeader;
 use serde::{Deserialize, Serialize};
