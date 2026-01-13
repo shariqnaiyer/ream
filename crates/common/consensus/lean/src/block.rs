@@ -81,7 +81,7 @@ impl SignedBlockWithAttestation {
                     signature.verify(
                         &validator.public_key,
                         attestation.data.slot as u32,
-                        &attestation.tree_hash_root(),
+                        &attestation.data.tree_hash_root(),
                     )?,
                     "Failed to verify"
                 );
