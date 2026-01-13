@@ -57,13 +57,23 @@ impl SignedBlockWithAttestation {
 
             if verify_signatures {
                 let timer = start_timer(&PQ_SIGNATURE_ATTESTATION_VERIFICATION_TIME, &[]);
+                let message_hash = attestation.data.tree_hash_root();
+                tracing::debug!(
+                    "Verifying signature for validator {} at slot {} with message hash: {}",
+                    attestation.validator_id,
+                    attestation.data.slot,
+                    alloy_primitives::hex::encode(&message_hash)
+                );
+                let result = signature.verify(
+                    &validator.public_key,
+                    attestation.data.slot as u32,
+                    &message_hash,  // Sign AttestationData, not full Attestation
+                )?;
                 ensure!(
-                    signature.verify(
-                        &validator.public_key,
-                        attestation.data.slot as u32,
-                        &attestation.tree_hash_root(),
-                    )?,
-                    "Failed to verify"
+                    result,
+                    "Failed to verify signature for validator {} at slot {}",
+                    attestation.validator_id,
+                    attestation.data.slot
                 );
                 stop_timer(timer);
             }

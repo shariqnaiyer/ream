@@ -30,8 +30,22 @@ pub struct BlockWithAttestation {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignatureData {
-    pub attestation_signatures: DataList<DataList<LeanSignature>>,
+    pub attestation_signatures: DataList<AggregatedAttestationSignature>,
     pub proposer_signature: LeanSignature,
+}
+
+/// Aggregated attestation signature with participants and proof data
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AggregatedAttestationSignature {
+    pub participants: DataList<bool>,  // Bitfield indicating which validators participated
+    pub proof_data: ProofData,
+}
+
+/// Proof data for aggregated signatures
+#[derive(Debug, Deserialize)]
+pub struct ProofData {
+    pub data: String,  // Hex string like "0x00"
 }
 
 /// XMSS signature structure

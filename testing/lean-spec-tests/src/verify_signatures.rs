@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail};
 use ream_consensus_lean::state::LeanState;
 use ream_network_spec::networks::LeanNetworkSpec;
 use tracing::info;
+use tree_hash::TreeHash;
 
 use crate::types::{TestFixture, verify_signatures::VerifySignaturesTest};
 
@@ -66,6 +67,40 @@ pub async fn run_verify_signatures_test(
         }
     );
 
+    // Log signature and attestation counts for debugging
+    tracing::debug!(
+        "Verification setup: {} signatures, {} block attestations, 1 proposer attestation",
+        signed_block.signature.len(),
+        signed_block.message.block.body.attestations.len()
+    );
+
+    // Log detailed verification parameters
+    let proposer_att = &signed_block.message.proposer_attestation;
+    tracing::debug!(
+        "Proposer attestation: validator_id={}, slot={}, data_root={:?}",
+        proposer_att.validator_id,
+        proposer_att.data.slot,
+        &proposer_att.data.tree_hash_root().as_slice()[..8]
+    );
+
+    tracing::debug!(
+        "AttestationData full hash: {}",
+        hex::encode(&proposer_att.data.tree_hash_root())
+    );
+
+    if let Some(validator) = state.validators.get(proposer_att.validator_id as usize) {
+        tracing::debug!(
+            "Validator {} pubkey (first 50 bytes): {}",
+            proposer_att.validator_id,
+            hex::encode(&validator.public_key.inner.as_slice()[..50])
+        );
+    }
+
+    tracing::debug!(
+        "Signature first 32 bytes: {:?}",
+        &signed_block.signature[0].inner.as_slice()[..32]
+    );
+
     // Verify signatures
     let verification_result = signed_block.verify_signatures(&state, true);
 
@@ -125,16 +160,34 @@ fn convert_signed_block(
     // Convert signatures
     let mut signatures = Vec::new();
 
-    // Add signatures for block body attestations (one signature per attestation)
-    // The attestation_signatures structure is: DataList<DataList<LeanSignature>>
-    // where each inner DataList corresponds to one attestation
-    for attestation_idx in 0..block.body.attestations.len() {
-        if let Some(attestation_sig_list) = test.signed_block_with_attestation.signature.attestation_signatures.data.get(attestation_idx) {
-            // For each attestation, aggregate all signatures in the list
-            // For now, we'll just use the first signature if multiple exist
-            if let Some(sig_data) = attestation_sig_list.data.first() {
-                signatures.push(convert_signature(sig_data)?);
-            }
+    // The new fixture format uses aggregated attestation signatures with participants and proofData.
+    // For testing purposes, we decode the proofData hex string into signature bytes.
+    // Each aggregated signature corresponds to one attestation in the block.
+    for (attestation_idx, agg_sig) in test
+        .signed_block_with_attestation
+        .signature
+        .attestation_signatures
+        .data
+        .iter()
+        .enumerate()
+    {
+        if attestation_idx >= block.body.attestations.len() {
+            break;
+        }
+
+        // Decode the hex proof data
+        let proof_hex = agg_sig.proof_data.data.strip_prefix("0x").unwrap_or(&agg_sig.proof_data.data);
+        let proof_bytes = hex::decode(proof_hex)
+            .map_err(|e| anyhow!("Failed to decode proof data hex: {}", e))?;
+
+        // For now, if proof_data is just "0x00" (1 byte), create a blank signature
+        // Otherwise, we'd need to parse it as a proper signature
+        if proof_bytes.len() == 1 && proof_bytes[0] == 0 {
+            tracing::debug!("Skipping aggregated signature {} with dummy proof data", attestation_idx);
+            signatures.push(ream_post_quantum_crypto::leansig::signature::Signature::blank());
+        } else {
+            // TODO: Parse actual aggregated proof data when available
+            bail!("Non-trivial aggregated proof data not yet supported");
         }
     }
 
@@ -156,53 +209,153 @@ fn convert_signed_block(
 /// Convert fixture LeanSignature to ream Signature
 ///
 /// The fixture signature format contains the raw XMSS signature components.
-/// We need to serialize these into the binary format expected by the leansig library.
+/// We need to convert these to the proper leansig library types and serialize using SSZ.
 fn convert_signature(
     sig: &crate::types::verify_signatures::LeanSignature,
 ) -> anyhow::Result<ream_post_quantum_crypto::leansig::signature::Signature> {
     use ream_post_quantum_crypto::leansig::signature::Signature;
 
-    // Serialize the signature components into bytes in the format expected by leansig
-    // The XMSS signature format appears to use length-prefixed variable-length arrays
-    let mut signature_bytes = Vec::new();
+    // XMSS signature structure varies by configuration:
+    // - TEST config (LOG_LIFETIME=8, DIMENSION=4): 8 siblings, 4 hashes → 424 bytes
+    // - PROD config (LOG_LIFETIME=32, DIMENSION=64): 32 siblings, 64 hashes → 3112 bytes
+    // Accept any configuration, but log for debugging
+    let num_siblings = sig.path.siblings.data.len();
+    let num_hashes = sig.hashes.data.len();
 
-    // Write number of siblings as u64 (8 bytes) for the path length
-    let num_siblings = sig.path.siblings.data.len() as u64;
-    signature_bytes.extend_from_slice(&num_siblings.to_le_bytes());
+    tracing::debug!(
+        "Converting signature with {} siblings and {} hashes",
+        num_siblings,
+        num_hashes
+    );
 
-    // Serialize path siblings - each sibling needs to be 36 bytes (4-byte index + 32-byte sibling)
-    for (idx, sibling) in sig.path.siblings.data.iter().enumerate() {
-        // Write the sibling index as u32 (4 bytes)
-        signature_bytes.extend_from_slice(&(idx as u32).to_le_bytes());
-        // Write the sibling data (32 bytes)
+    // Allow empty signatures for invalid test cases (they should fail verification)
+    // But warn about them
+    if num_siblings == 0 || num_hashes == 0 {
+        tracing::warn!(
+            "Empty signature structure: {} siblings and {} hashes - will use blank signature",
+            num_siblings,
+            num_hashes
+        );
+        // Return a blank signature that will fail verification
+        return Ok(ream_post_quantum_crypto::leansig::signature::Signature::blank());
+    }
+
+    // Construct SSZ bytes manually following the SSZ specification for GeneralizedXMSSSignature
+    // The signature structure is: GeneralizedXMSSSignature<IE, TH> {
+    //   path: HashTreeOpening<TH>,    // variable length
+    //   rho: IE::Randomness,           // fixed length (FieldArray<7>)
+    //   hashes: Vec<TH::Domain>        // variable length (Vec<FieldArray<8>>)
+    // }
+
+    // First, encode the path (HashTreeOpening)
+    // HashTreeOpening contains: co_path: Vec<FieldArray<8>>
+    let mut path_bytes = Vec::new();
+    // Offset points to start of variable data (right after the 4-byte offset)
+    path_bytes.extend_from_slice(&4u32.to_le_bytes());
+    // Encode Vec<FieldArray<8>> for siblings
+    // In SSZ, Vec<T> where T is fixed-length is encoded as just the elements concatenated
+    // NO length prefix! The length is implicit from the total byte length.
+    for sibling in &sig.path.siblings.data {
         for &val in &sibling.data {
-            signature_bytes.extend_from_slice(&val.to_le_bytes());
+            path_bytes.extend_from_slice(&val.to_le_bytes());
         }
     }
 
-    // Serialize rho - 7 u32 values (no length prefix, fixed size)
+    // Encode rho (FieldArray<7>) - fixed 28 bytes
+    let mut rho_bytes = Vec::new();
+    tracing::debug!("Rho values from fixture: {:?}", &sig.rho.data);
     for &val in &sig.rho.data {
-        signature_bytes.extend_from_slice(&val.to_le_bytes());
+        rho_bytes.extend_from_slice(&val.to_le_bytes());
     }
 
-    // Write number of hashes as u64 (8 bytes)
-    let num_hashes = sig.hashes.data.len() as u64;
-    signature_bytes.extend_from_slice(&num_hashes.to_le_bytes());
-
-    // Serialize hashes - each hash needs to be 36 bytes (4-byte index + 32-byte hash)
-    for (idx, hash) in sig.hashes.data.iter().enumerate() {
-        // Write the leaf index as u32 (4 bytes)
-        signature_bytes.extend_from_slice(&(idx as u32).to_le_bytes());
-        // Write the hash data (32 bytes)
+    // Encode hashes (Vec<FieldArray<8>>)
+    // Same as above - no length prefix for Vec<T> where T is fixed-length
+    let mut hashes_bytes = Vec::new();
+    for hash in &sig.hashes.data {
         for &val in &hash.data {
-            signature_bytes.extend_from_slice(&val.to_le_bytes());
+            hashes_bytes.extend_from_slice(&val.to_le_bytes());
         }
     }
 
-    // Pad or truncate to 3112 bytes (SIGNATURE_SIZE)
-    const SIGNATURE_SIZE: usize = 3112;
-    signature_bytes.resize(SIGNATURE_SIZE, 0);
+    // Now construct the full GeneralizedXMSSSignature bytes
+    let mut sig_bytes = Vec::new();
 
-    // Create signature from bytes
-    Ok(Signature::from(&signature_bytes[..]))
+    // Calculate offsets
+    let rho_size = 7 * 4; // 7 field elements * 4 bytes each = 28 bytes
+    let fixed_size = 4 + rho_size + 4; // offset_path + rho + offset_hashes = 36 bytes
+
+    let offset_path = fixed_size;
+    let offset_hashes = offset_path + path_bytes.len();
+
+    // Write offset for path (4 bytes)
+    sig_bytes.extend_from_slice(&(offset_path as u32).to_le_bytes());
+
+    // Write rho (28 bytes, fixed)
+    sig_bytes.extend_from_slice(&rho_bytes);
+
+    // Write offset for hashes (4 bytes)
+    sig_bytes.extend_from_slice(&(offset_hashes as u32).to_le_bytes());
+
+    // Write path data (variable)
+    sig_bytes.extend_from_slice(&path_bytes);
+
+    // Write hashes data (variable)
+    sig_bytes.extend_from_slice(&hashes_bytes);
+
+    // Debug: log the detailed byte breakdown
+    tracing::debug!(
+        "SSZ breakdown: fixed_part={} bytes, path_data={} bytes, hashes_data={} bytes, total={}",
+        36,
+        path_bytes.len(),
+        hashes_bytes.len(),
+        sig_bytes.len()
+    );
+
+    // Dump signature bytes for debugging
+    tracing::debug!(
+        "Converted signature size: {} bytes",
+        sig_bytes.len()
+    );
+    if sig_bytes.len() >= 100 {
+        tracing::debug!(
+            "Converted signature first 100 bytes: {}",
+            sig_bytes[..100].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("")
+        );
+    }
+    if sig_bytes.len() >= 200 {
+        tracing::debug!(
+            "Converted signature bytes 100-200: {}",
+            sig_bytes[100..200].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("")
+        );
+    }
+
+    // Using PROD config (3112 bytes)
+    const EXPECTED_SIGNATURE_SIZE: usize = 3112;
+
+    if sig_bytes.len() != EXPECTED_SIGNATURE_SIZE {
+        bail!(
+            "Signature size {} does not match expected size {}. For PROD config (LOG_LIFETIME=32, DIMENSION=64), signatures must be exactly 3112 bytes.",
+            sig_bytes.len(),
+            EXPECTED_SIGNATURE_SIZE
+        );
+    }
+
+    tracing::debug!(
+        "Signature is exactly {} bytes (PROD config)",
+        EXPECTED_SIGNATURE_SIZE
+    );
+
+    // Create signature directly from the padded SSZ bytes
+    let signature = Signature::from(&sig_bytes[..]);
+
+    // Verify round-trip: decode the signature we just created
+    tracing::debug!("Testing signature round-trip deserialization...");
+    let decoded_sig = signature.as_lean_sig();
+    if let Err(e) = decoded_sig {
+        tracing::error!("Failed to decode signature back: {}", e);
+    } else {
+        tracing::debug!("Signature round-trip successful");
+    }
+
+    Ok(signature)
 }
