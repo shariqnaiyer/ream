@@ -875,6 +875,45 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(feature = "devnet2")]
+    /// Process a signed attestation from gossip network.
+    /// 1. Validates attestation structure
+    /// 2. Verifies XMSS signature
+    /// 3. Calls on_attestation to process the attestation data
+    pub async fn on_gossip_attestation(
+        &self,
+        signed_attestation: SignedAttestation,
+    ) -> anyhow::Result<()> {
+        let validator_id = signed_attestation.validator_id;
+        let attestation_data = &signed_attestation.message;
+        let signature = &signed_attestation.signature;
+
+        self.validate_attestation(&signed_attestation).await?;
+
+        let state_provider = self.store.lock().await.state_provider();
+        let key_state = state_provider
+            .get(attestation_data.target.root)?
+            .ok_or_else(|| anyhow!("No state available for signature verification"))?;
+
+        ensure!(
+            validator_id < key_state.validators.len() as u64,
+            "Validator {validator_id} not found in state",
+        );
+
+        ensure!(
+            signature.verify(
+                &key_state.validators[validator_id as usize].public_key,
+                attestation_data.slot as u32,
+                &attestation_data.tree_hash_root(),
+            )?,
+            "Signature verification failed"
+        );
+
+        self.on_attestation(signed_attestation, false).await?;
+
+        Ok(())
+    }
+
     pub async fn produce_attestation_data(&self, slot: u64) -> anyhow::Result<AttestationData> {
         let (head_provider, block_provider, latest_justified_provider) = {
             let db = self.store.lock().await;
