@@ -8,11 +8,9 @@ use ssz_types::{VariableList, typenum::U4096};
 use tree_hash::TreeHash;
 use tree_hash_derive::TreeHash;
 
-#[cfg(feature = "devnet1")]
-use crate::attestation::Attestation;
 #[cfg(feature = "devnet2")]
-use crate::attestation::{AggregatedAttestation, AggregatedAttestations};
-use crate::state::LeanState;
+use crate::attestation::AggregatedAttestation;
+use crate::{attestation::Attestation, state::LeanState};
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct BlockSignatures {
@@ -21,13 +19,19 @@ pub struct BlockSignatures {
 }
 
 /// Envelope carrying a block, an attestation from proposer, and aggregated signatures.
+#[cfg(not(feature = "devnet2"))]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct SignedBlockWithAttestation {
     pub message: BlockWithAttestation,
-    #[cfg(feature = "devnet2")]
-    pub signature: BlockSignatures,
-    #[cfg(feature = "devnet1")]
     pub signature: VariableList<Signature, U4096>,
+}
+
+/// Envelope carrying a block, an attestation from proposer, and aggregated signatures.
+#[cfg(feature = "devnet2")]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct SignedBlockWithAttestation {
+    pub message: BlockWithAttestation,
+    pub signature: BlockSignatures,
 }
 
 impl SignedBlockWithAttestation {
@@ -38,17 +42,17 @@ impl SignedBlockWithAttestation {
     ) -> anyhow::Result<bool> {
         let block = &self.message.block;
         let signatures = &self.signature;
-        #[cfg(feature = "devnet1")]
+        #[cfg(not(feature = "devnet2"))]
         let mut all_attestations = block.body.attestations.to_vec();
         #[cfg(feature = "devnet2")]
         let aggregated_attestations = &block.body.attestations;
         #[cfg(feature = "devnet2")]
         let attestation_signatures = &signatures.attestation_signatures;
 
-        #[cfg(feature = "devnet1")]
+        #[cfg(not(feature = "devnet2"))]
         all_attestations.push(self.message.proposer_attestation.clone());
 
-        #[cfg(feature = "devnet1")]
+        #[cfg(not(feature = "devnet2"))]
         ensure!(
             signatures.len() == all_attestations.len(),
             "Number of signatures {} does not match number of attestations {}",
@@ -65,7 +69,7 @@ impl SignedBlockWithAttestation {
 
         let validators = &parent_state.validators;
 
-        #[cfg(feature = "devnet1")]
+        #[cfg(not(feature = "devnet2"))]
         for (attestation, signature) in all_attestations.iter().zip(signatures.iter()) {
             ensure!(
                 attestation.validator_id < validators.len() as u64,
@@ -161,13 +165,19 @@ impl SignedBlockWithAttestation {
 }
 
 /// Bundle containing a block and the proposer's attestation.
+#[cfg(not(feature = "devnet2"))]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct BlockWithAttestation {
     pub block: Block,
-    #[cfg(feature = "devnet1")]
     pub proposer_attestation: Attestation,
-    #[cfg(feature = "devnet2")]
-    pub proposer_attestation: AggregatedAttestations,
+}
+
+/// Bundle containing a block and the proposer's attestation.
+#[cfg(feature = "devnet2")]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct BlockWithAttestation {
+    pub block: Block,
+    pub proposer_attestation: Attestation,
 }
 
 /// Represents a block in the Lean chain.
@@ -207,7 +217,7 @@ impl From<Block> for BlockHeader {
 /// Represents the body of a block in the Lean chain.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
 pub struct BlockBody {
-    #[cfg(feature = "devnet1")]
+    #[cfg(not(feature = "devnet2"))]
     pub attestations: VariableList<Attestation, U4096>,
     #[cfg(feature = "devnet2")]
     pub attestations: VariableList<AggregatedAttestation, U4096>,
@@ -220,7 +230,7 @@ pub struct BlockWithSignatures {
 }
 
 #[cfg(test)]
-#[cfg(feature = "devnet1")]
+#[cfg(not(feature = "devnet2"))]
 mod tests {
     use alloy_primitives::hex;
     use ssz::{Decode, Encode};

@@ -6,10 +6,8 @@ use anyhow::{anyhow, ensure};
 use ream_consensus_lean::attestation::AggregatedAttestation;
 #[cfg(feature = "devnet2")]
 use ream_consensus_lean::attestation::AggregatedAttestations;
-#[cfg(feature = "devnet1")]
-use ream_consensus_lean::attestation::Attestation;
 use ream_consensus_lean::{
-    attestation::{AttestationData, SignedAttestation},
+    attestation::{Attestation, AttestationData, SignedAttestation},
     block::{Block, BlockBody, BlockWithSignatures, SignedBlockWithAttestation},
     checkpoint::Checkpoint,
     state::LeanState,
@@ -671,14 +669,12 @@ impl Store {
                 .signature
                 .attestation_signatures;
 
-            ensure!(
-                aggregated_attestations.len() == attestation_signatures.len(),
-                "Attestation signature groups must match aggregated attestations"
-            );
+            let aggregated_payloads_provider =
+                self.store.lock().await.aggregated_payloads_provider();
 
-            for (aggregated_attestation, aggregated_signature) in aggregated_attestations
+            for (aggregated_attestation, proof) in aggregated_attestations
                 .into_iter()
-                .zip(attestation_signatures)
+                .zip(attestation_signatures.iter())
             {
                 let validator_ids: Vec<u64> = aggregated_attestation
                     .aggregation_bits
@@ -688,19 +684,18 @@ impl Store {
                     .map(|(index, _)| index as u64)
                     .collect();
 
-                ensure!(
-                    validator_ids.len() == aggregated_signature.inner.len(),
-                    "Aggregated attestation signature count mismatch"
-                );
+                let data_root = aggregated_attestation.message.tree_hash_root();
 
-                for (validator_id, signature) in
-                    validator_ids.into_iter().zip(attestation_signatures)
-                {
+                for validator_id in validator_ids {
+                    // Store proof in aggregated_payloads for future block building
+                    let key = SignatureKey::new(validator_id, data_root);
+                    aggregated_payloads_provider.append(key, *proof)?;
+
+                    // Update fork choice
                     self.on_attestation(
-                        SignedAttestation {
+                        Attestation {
                             validator_id,
-                            message: aggregated_attestation.message.clone(),
-                            signature: *signature,
+                            data: aggregated_attestation.message.clone(),
                         },
                         true,
                     )
@@ -711,37 +706,52 @@ impl Store {
 
         self.update_head().await?;
 
+        #[cfg(feature = "devnet1")]
         self.on_attestation(
             SignedAttestation {
-                #[cfg(feature = "devnet1")]
                 message: proposer_attestation.clone(),
-                #[cfg(feature = "devnet1")]
                 signature: *signatures
                     .get(block.body.attestations.len())
-                    .ok_or(anyhow!("Failed to get attestation"))?,
-                #[cfg(feature = "devnet2")]
-                message: proposer_attestation.data.clone(),
-                #[cfg(feature = "devnet2")]
-                signature: signed_block_with_attestation.signature.proposer_signature,
-                #[cfg(feature = "devnet2")]
-                validator_id: proposer_attestation.validator_id,
+                    .ok_or(anyhow!("Failed to get proposer attestation signature"))?,
             },
             false,
         )
         .await?;
 
+        #[cfg(feature = "devnet2")]
+        {
+            // Process proposer attestation as gossip (is_from_block=false)
+            self.on_attestation(
+                Attestation {
+                    validator_id: proposer_attestation.validator_id,
+                    data: proposer_attestation.data.clone(),
+                },
+                false,
+            )
+            .await?;
+
+            // Store proposer signature in gossip_signatures for future block building
+            let proposer_sig_key = SignatureKey::new(
+                proposer_attestation.validator_id,
+                proposer_attestation.data.tree_hash_root(),
+            );
+            let gossip_signatures_provider = self.store.lock().await.gossip_signatures_provider();
+            gossip_signatures_provider.insert(
+                proposer_sig_key,
+                signed_block_with_attestation.signature.proposer_signature,
+            )?;
+        }
+
         stop_timer(block_processing_timer);
         Ok(())
     }
 
+    #[cfg(feature = "devnet1")]
     pub async fn validate_attestation(
         &self,
         signed_attestation: &SignedAttestation,
     ) -> anyhow::Result<()> {
-        #[cfg(feature = "devnet1")]
         let data = &signed_attestation.message.data;
-        #[cfg(feature = "devnet2")]
-        let data = &signed_attestation.message;
         let block_provider = self.store.lock().await.block_provider();
 
         // Validate attestation targets exist in store
@@ -795,6 +805,63 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(feature = "devnet2")]
+    pub async fn validate_attestation(&self, attestation: &Attestation) -> anyhow::Result<()> {
+        let data = &attestation.data;
+        let block_provider = self.store.lock().await.block_provider();
+
+        // Validate attestation targets exist in store
+        ensure!(
+            block_provider.contains_key(data.source.root),
+            "Unknown source block: {}",
+            data.source.root
+        );
+        ensure!(
+            block_provider.contains_key(data.target.root),
+            "Unknown target block: {}",
+            data.target.root
+        );
+        ensure!(
+            block_provider.contains_key(data.head.root),
+            "Unknown head block: {}",
+            data.head.root
+        );
+        ensure!(
+            data.source.slot <= data.target.slot,
+            "Source checkpoint slot must not exceed target"
+        );
+
+        // Validate slot relationships
+        let source_block = block_provider
+            .get(data.source.root)?
+            .ok_or(anyhow!("Failed to get source block"))?;
+
+        let target_block = block_provider
+            .get(data.target.root)?
+            .ok_or(anyhow!("Failed to get target block"))?;
+        ensure!(
+            source_block.message.block.slot == data.source.slot,
+            "Source checkpoint slot mismatch"
+        );
+
+        ensure!(
+            target_block.message.block.slot == data.target.slot,
+            "Target checkpoint slot mismatch"
+        );
+
+        let current_slot =
+            self.store.lock().await.time_provider().get()? / lean_network_spec().seconds_per_slot;
+        ensure!(
+            data.slot <= current_slot + 1,
+            "Attestation too far in future expected slot: {} <= {}",
+            data.slot,
+            current_slot + 1,
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "devnet1")]
     pub async fn on_attestation(
         &self,
         signed_attestation: SignedAttestation,
@@ -823,32 +890,19 @@ impl Store {
             }
         }
 
-        #[cfg(feature = "devnet1")]
         let validator_id = signed_attestation.message.validator_id;
-        #[cfg(feature = "devnet1")]
         let attestation_slot = signed_attestation.message.data.slot;
-
-        #[cfg(feature = "devnet2")]
-        let validator_id = signed_attestation.validator_id;
-        #[cfg(feature = "devnet2")]
-        let attestation_slot = signed_attestation.message.slot;
 
         if is_from_block {
             let latest_known = match latest_known_attestations_provider.get(validator_id)? {
-                #[cfg(feature = "devnet1")]
                 Some(latest_known) => latest_known.message.data.slot < attestation_slot,
-                #[cfg(feature = "devnet2")]
-                Some(latest_known) => latest_known.message.slot < attestation_slot,
                 None => true,
             };
             if latest_known {
                 latest_known_attestations_provider.insert(validator_id, signed_attestation)?;
             }
             let remove = match latest_new_attestations_provider.get(validator_id)? {
-                #[cfg(feature = "devnet1")]
                 Some(new_new) => new_new.message.data.slot <= attestation_slot,
-                #[cfg(feature = "devnet2")]
-                Some(new_new) => new_new.message.slot <= attestation_slot,
                 None => false,
             };
             if remove {
@@ -861,14 +915,76 @@ impl Store {
                 "Attestation from future slot {attestation_slot} <= {time_slots}",
             );
             let latest_new = match latest_new_attestations_provider.get(validator_id)? {
-                #[cfg(feature = "devnet1")]
                 Some(latest_new) => latest_new.message.data.slot < attestation_slot,
-                #[cfg(feature = "devnet2")]
-                Some(latest_new) => latest_new.message.slot < attestation_slot,
                 None => true,
             };
             if latest_new {
                 latest_new_attestations_provider.insert(validator_id, signed_attestation)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "devnet2")]
+    pub async fn on_attestation(
+        &self,
+        attestation: Attestation,
+        is_from_block: bool,
+    ) -> anyhow::Result<()> {
+        let (latest_known_attestations_provider, latest_new_attestations_provider, time_provider) = {
+            let db = self.store.lock().await;
+            (
+                db.latest_known_attestations_provider(),
+                db.latest_new_attestations_provider(),
+                db.time_provider(),
+            )
+        };
+
+        let validate_attestation_timer = start_timer(&ATTESTATION_VALIDATION_TIME, &[]);
+
+        match self.validate_attestation(&attestation).await {
+            Ok(_) => {
+                inc_int_counter_vec(&ATTESTATIONS_VALID_TOTAL, &[]);
+                stop_timer(validate_attestation_timer);
+            }
+            Err(err) => {
+                inc_int_counter_vec(&ATTESTATIONS_INVALID_TOTAL, &[]);
+                stop_timer(validate_attestation_timer);
+                return Err(err);
+            }
+        }
+
+        let validator_id = attestation.validator_id;
+        let attestation_slot = attestation.data.slot;
+
+        if is_from_block {
+            let latest_known = match latest_known_attestations_provider.get(validator_id)? {
+                Some(latest_known) => latest_known.data.slot < attestation_slot,
+                None => true,
+            };
+            if latest_known {
+                latest_known_attestations_provider.insert(validator_id, attestation)?;
+            }
+            let remove = match latest_new_attestations_provider.get(validator_id)? {
+                Some(new_new) => new_new.data.slot <= attestation_slot,
+                None => false,
+            };
+            if remove {
+                latest_new_attestations_provider.remove(validator_id)?;
+            }
+        } else {
+            let time_slots = time_provider.get()? / lean_network_spec().seconds_per_slot;
+            ensure!(
+                attestation_slot <= time_slots,
+                "Attestation from future slot {attestation_slot} <= {time_slots}",
+            );
+            let latest_new = match latest_new_attestations_provider.get(validator_id)? {
+                Some(latest_new) => latest_new.data.slot < attestation_slot,
+                None => true,
+            };
+            if latest_new {
+                latest_new_attestations_provider.insert(validator_id, attestation)?;
             }
         }
 
@@ -885,11 +1001,19 @@ impl Store {
         signed_attestation: SignedAttestation,
     ) -> anyhow::Result<()> {
         let validator_id = signed_attestation.validator_id;
-        let attestation_data = &signed_attestation.message;
+        let attestation_data = signed_attestation.message;
         let signature = &signed_attestation.signature;
 
-        self.validate_attestation(&signed_attestation).await?;
+        // Extract Attestation from SignedAttestation
+        let attestation = Attestation {
+            validator_id,
+            data: attestation_data.clone(),
+        };
 
+        // Validate attestation structure
+        self.validate_attestation(&attestation).await?;
+
+        // Verify XMSS signature
         let state_provider = self.store.lock().await.state_provider();
         let key_state = state_provider
             .get(attestation_data.target.root)?
@@ -909,7 +1033,8 @@ impl Store {
             "Signature verification failed"
         );
 
-        self.on_attestation(signed_attestation, false).await?;
+        // Process the attestation
+        self.on_attestation(attestation, false).await?;
 
         Ok(())
     }

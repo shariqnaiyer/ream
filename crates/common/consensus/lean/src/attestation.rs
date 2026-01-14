@@ -17,14 +17,12 @@ pub struct AttestationData {
 }
 
 /// Validator specific attestation wrapping shared attestation data.
-#[cfg(feature = "devnet1")]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
 pub struct Attestation {
     pub validator_id: u64,
     pub data: AttestationData,
 }
 
-#[cfg(feature = "devnet1")]
 impl Attestation {
     /// Return the attested slot.
     pub fn slot(&self) -> u64 {
@@ -47,14 +45,33 @@ impl Attestation {
     }
 }
 
-#[cfg(feature = "devnet2")]
+/// Validator attestation bundled with its signature.
+#[cfg(not(feature = "devnet2"))]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
-pub struct AggregatedAttestations {
-    pub validator_id: u64,
-    pub data: AttestationData,
+pub struct SignedAttestation {
+    pub message: Attestation,
+    /// signature over attestation message only as it would be aggregated later in attestation
+    pub signature: Signature,
 }
 
+/// Validator attestation bundled with its signature.
 #[cfg(feature = "devnet2")]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
+pub struct SignedAttestation {
+    pub validator_id: u64,
+    pub message: AttestationData,
+    /// signature over attestation message only as it would be aggregated later in attestation
+    pub signature: Signature,
+}
+
+/// Aggregated attestation consisting of participation bits and message.
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
+pub struct AggregatedAttestation {
+    /// U4096 = VALIDATOR_REGISTRY_LIMIT
+    pub aggregation_bits: BitList<U4096>,
+    pub message: AttestationData,
+}
+
 impl AggregatedAttestation {
     /// Return the attested slot.
     pub fn slot(&self) -> u64 {
@@ -77,27 +94,6 @@ impl AggregatedAttestation {
     }
 }
 
-/// Validator attestation bundled with its signature.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
-pub struct SignedAttestation {
-    #[cfg(feature = "devnet2")]
-    pub validator_id: u64,
-    #[cfg(feature = "devnet2")]
-    pub message: AttestationData,
-    #[cfg(feature = "devnet1")]
-    pub message: Attestation,
-    /// signature over attestaion message only as it would be aggregated later in attestation
-    pub signature: Signature,
-}
-
-/// Aggregated attestation consisting of participation bits and message.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
-pub struct AggregatedAttestation {
-    /// U4096 = VALIDATOR_REGISTRY_LIMIT
-    pub aggregation_bits: BitList<U4096>,
-    pub message: AttestationData,
-}
-
 /// Aggregated attestation bundled with aggregated signatures.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
 pub struct SignedAggregatedAttestation {
@@ -107,7 +103,7 @@ pub struct SignedAggregatedAttestation {
 }
 
 #[cfg(test)]
-#[cfg(feature = "devnet1")]
+#[cfg(not(feature = "devnet2"))]
 mod tests {
     use alloy_primitives::hex;
     use ssz::{Decode, Encode};

@@ -8,6 +8,7 @@ use crate::{
     tables::{
         field::REDBField,
         lean::{
+            aggregated_payloads::AggregatedPayloadsTable, gossip_signatures::GossipSignaturesTable,
             latest_finalized::LatestFinalizedField, latest_justified::LatestJustifiedField,
             latest_known_attestation::LatestKnownAttestationTable, lean_block::LeanBlockTable,
             lean_head::LeanHeadField, lean_latest_new_attestations::LeanLatestNewAttestationsTable,
@@ -96,6 +97,18 @@ impl LeanDB {
 
     pub fn latest_new_attestations_provider(&self) -> LeanLatestNewAttestationsTable {
         LeanLatestNewAttestationsTable {
+            db: self.db.clone(),
+        }
+    }
+
+    pub fn aggregated_payloads_provider(&self) -> AggregatedPayloadsTable {
+        AggregatedPayloadsTable {
+            db: self.db.clone(),
+        }
+    }
+
+    pub fn gossip_signatures_provider(&self) -> GossipSignaturesTable {
+        GossipSignaturesTable {
             db: self.db.clone(),
         }
     }

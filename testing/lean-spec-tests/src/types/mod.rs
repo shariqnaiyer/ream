@@ -267,8 +267,9 @@ impl TryFrom<&Block> for ReamBlock {
                     });
                 } else if let Some(validator_id) = att.validator_id {
                     // Convert individual attestation to aggregated format with single bit set
-                    let mut aggregation_bits = BitList::<U4096>::with_capacity(validator_id as usize + 1)
-                        .map_err(|err| anyhow!("Failed to create BitList: {err:?}"))?;
+                    let mut aggregation_bits =
+                        BitList::<U4096>::with_capacity(validator_id as usize + 1)
+                            .map_err(|err| anyhow!("Failed to create BitList: {err:?}"))?;
                     aggregation_bits
                         .set(validator_id as usize, true)
                         .map_err(|err| anyhow!("Failed to set bit: {err:?}"))?;

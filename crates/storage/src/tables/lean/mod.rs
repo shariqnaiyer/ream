@@ -1,3 +1,5 @@
+pub mod aggregated_payloads;
+pub mod gossip_signatures;
 pub mod latest_finalized;
 pub mod latest_justified;
 pub mod latest_known_attestation;
