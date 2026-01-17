@@ -8,6 +8,8 @@ use ream_consensus_lean::attestation::AggregatedAttestation;
 use ream_consensus_lean::attestation::AggregatedAttestations;
 #[cfg(feature = "devnet1")]
 use ream_consensus_lean::attestation::Attestation;
+#[cfg(feature = "devnet2")]
+use ream_consensus_lean::attestation::SignatureKey;
 use ream_consensus_lean::{
     attestation::{AttestationData, SignedAttestation},
     block::{Block, BlockBody, BlockWithSignatures, SignedBlockWithAttestation},
@@ -489,12 +491,20 @@ impl Store {
     ) -> anyhow::Result<(Block, Vec<AggregateSignature>, LeanState)> {
         use ream_post_quantum_crypto::lean_multisig::aggregate::aggregate_signatures;
 
-        let (state_provider, latest_known_attestation_provider, block_provider) = {
+        let (
+            state_provider,
+            latest_known_attestation_provider,
+            block_provider,
+            gossip_signatures_provider,
+            aggregated_payloads_provider,
+        ) = {
             let db = self.store.lock().await;
             (
                 db.state_provider(),
                 db.latest_known_attestations_provider(),
                 db.block_provider(),
+                db.gossip_signatures_provider(),
+                db.aggregated_payloads_provider(),
             )
         };
         let available_signed_attestations =
@@ -504,9 +514,6 @@ impl Store {
             .ok_or(anyhow!("State not found for head root"))?;
         let mut attestations: VariableList<AggregatedAttestations, U4096> =
             attestations.unwrap_or_else(VariableList::empty);
-
-        // Collect individual signatures per validator for later aggregation
-        let mut signatures_map: HashMap<u64, Signature> = HashMap::new();
 
         let (mut candidate_block, post_state) = loop {
             // Group attestations by data for aggregation
@@ -571,10 +578,6 @@ impl Store {
                     new_attestations
                         .push(attestation)
                         .map_err(|err| anyhow!("Could not append attestation: {err:?}"))?;
-                    signatures_map.insert(
-                        signed_attestation.validator_id,
-                        signed_attestation.signature,
-                    );
                 }
             }
             if new_attestations.is_empty() {
@@ -589,35 +592,67 @@ impl Store {
         };
 
         // Aggregate signatures per aggregated attestation
+        // Use gossip_signatures and aggregated_payloads for signature aggregation
         let mut aggregated_signatures: Vec<AggregateSignature> = Vec::new();
         for aggregated_attestation in candidate_block.body.attestations.iter() {
-            let validator_ids: Vec<usize> = aggregated_attestation
+            let validator_ids: Vec<u64> = aggregated_attestation
                 .aggregation_bits
                 .iter()
                 .enumerate()
                 .filter(|(_, bit)| *bit)
-                .map(|(index, _)| index)
+                .map(|(index, _)| index as u64)
                 .collect();
 
+            let data_root = aggregated_attestation.message.tree_hash_root();
+
+            let mut found_existing_proof = false;
+            for validator_id in &validator_ids {
+                if let Ok(Some(payloads)) = aggregated_payloads_provider
+                    .get_payloads(&SignatureKey::from_parts(*validator_id, data_root))
+                    && let Some(proof) = payloads.proofs.first()
+                {
+                    // Reuse the first existing aggregated proof
+                    aggregated_signatures.push(proof.clone());
+                    found_existing_proof = true;
+                    break;
+                }
+            }
+
+            if found_existing_proof {
+                continue;
+            }
+
+            // No existing proofs - try to aggregate from gossip signatures
             let public_keys: Vec<_> = validator_ids
                 .iter()
                 .filter_map(|&validator_id| {
                     head_state
                         .validators
-                        .get(validator_id)
+                        .get(validator_id as usize)
                         .map(|validator| validator.public_key)
                 })
                 .collect();
 
-            let sigs: Vec<_> = validator_ids
+            // Try gossip_signatures first, fall back to latest_known_attestation_provider
+            let signatures: Vec<_> = validator_ids
                 .iter()
-                .filter_map(|&vid| signatures_map.get(&(vid as u64)).cloned())
+                .filter_map(|&validator_id| {
+                    // First try gossip_signatures
+                    if let Ok(Some(sig)) = gossip_signatures_provider
+                        .get_signature(&SignatureKey::from_parts(validator_id, data_root))
+                    {
+                        return Some(sig);
+                    }
+                    // Fall back to latest_known_attestation_provider
+                    available_signed_attestations
+                        .get(&validator_id)
+                        .map(|signed_attestation| signed_attestation.signature)
+                })
                 .collect();
 
-            if !sigs.is_empty() && sigs.len() == public_keys.len() {
-                let attestation_root = aggregated_attestation.message.tree_hash_root();
+            if !signatures.is_empty() && signatures.len() == public_keys.len() {
                 let aggregate_sig =
-                    aggregate_signatures(&public_keys, &sigs, &attestation_root, slot as u32)?;
+                    aggregate_signatures(&public_keys, &signatures, &data_root, slot as u32)?;
                 aggregated_signatures.push(aggregate_sig);
             } else {
                 // Create empty aggregate signature for attestations without signatures
@@ -763,9 +798,14 @@ impl Store {
                 "Attestation signature groups must match aggregated attestations"
             );
 
-            // Process each aggregated attestation for fork choice
-            // Signatures were already verified at block level via verify_signatures()
-            for aggregated_attestation in aggregated_attestations.iter() {
+            let aggregated_payloads_provider =
+                self.store.lock().await.aggregated_payloads_provider();
+
+            // Process each aggregated attestation for fork choice and store proofs
+            for (aggregated_attestation, aggregated_proof) in aggregated_attestations
+                .iter()
+                .zip(attestation_signatures.iter())
+            {
                 let validator_ids: Vec<u64> = aggregated_attestation
                     .aggregation_bits
                     .iter()
@@ -774,8 +814,17 @@ impl Store {
                     .map(|(index, _)| index as u64)
                     .collect();
 
-                // Process each validator's attestation for fork choice
+                // Process each validator's attestation for fork choice and store proofs
                 for validator_id in validator_ids {
+                    // Store the aggregated proof for this validator
+                    aggregated_payloads_provider.append_proof(
+                        SignatureKey::from_parts(
+                            validator_id,
+                            aggregated_attestation.message.tree_hash_root(),
+                        ),
+                        aggregated_proof.clone(),
+                    )?;
+
                     self.on_attestation(
                         SignedAttestation {
                             validator_id,
@@ -792,24 +841,40 @@ impl Store {
 
         self.update_head().await?;
 
+        #[cfg(feature = "devnet1")]
         self.on_attestation(
             SignedAttestation {
-                #[cfg(feature = "devnet1")]
                 message: proposer_attestation.clone(),
-                #[cfg(feature = "devnet1")]
                 signature: *signatures
                     .get(block.body.attestations.len())
                     .ok_or(anyhow!("Failed to get attestation"))?,
-                #[cfg(feature = "devnet2")]
-                message: proposer_attestation.data.clone(),
-                #[cfg(feature = "devnet2")]
-                signature: signed_block_with_attestation.signature.proposer_signature,
-                #[cfg(feature = "devnet2")]
-                validator_id: proposer_attestation.validator_id,
             },
             false,
         )
         .await?;
+
+        #[cfg(feature = "devnet2")]
+        {
+            // Store proposer signature in gossip_signatures for future block building
+            let gossip_signatures_provider = self.store.lock().await.gossip_signatures_provider();
+            gossip_signatures_provider.insert_signature(
+                SignatureKey::new(
+                    proposer_attestation.validator_id,
+                    &proposer_attestation.data,
+                ),
+                signed_block_with_attestation.signature.proposer_signature,
+            )?;
+
+            self.on_attestation(
+                SignedAttestation {
+                    message: proposer_attestation.data.clone(),
+                    signature: signed_block_with_attestation.signature.proposer_signature,
+                    validator_id: proposer_attestation.validator_id,
+                },
+                false,
+            )
+            .await?;
+        }
 
         stop_timer(block_processing_timer);
         Ok(())
@@ -960,18 +1025,22 @@ impl Store {
     /// Process a signed attestation from gossip network.
     /// 1. Validates attestation structure
     /// 2. Verifies XMSS signature
-    /// 3. Calls on_attestation to process the attestation data
+    /// 3. Stores the signature in gossip_signatures for later block building
+    /// 4. Calls on_attestation to process the attestation data
     pub async fn on_gossip_attestation(
         &self,
         signed_attestation: SignedAttestation,
     ) -> anyhow::Result<()> {
         let validator_id = signed_attestation.validator_id;
         let attestation_data = &signed_attestation.message;
-        let signature = &signed_attestation.signature;
+        let signature = signed_attestation.signature;
 
         self.validate_attestation(&signed_attestation).await?;
 
-        let state_provider = self.store.lock().await.state_provider();
+        let (state_provider, gossip_signatures_provider) = {
+            let db = self.store.lock().await;
+            (db.state_provider(), db.gossip_signatures_provider())
+        };
         let key_state = state_provider
             .get(attestation_data.target.root)?
             .ok_or_else(|| anyhow!("No state available for signature verification"))?;
@@ -989,6 +1058,10 @@ impl Store {
             )?,
             "Signature verification failed"
         );
+
+        // Store signature for later lookup during block building
+        gossip_signatures_provider
+            .insert_signature(SignatureKey::new(validator_id, attestation_data), signature)?;
 
         self.on_attestation(signed_attestation, false).await?;
 
