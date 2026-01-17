@@ -24,6 +24,8 @@ use ream_metrics::{
 };
 use ream_network_spec::networks::lean_network_spec;
 use ream_network_state_lean::NetworkState;
+#[cfg(feature = "devnet2")]
+use ream_post_quantum_crypto::lean_multisig::aggregate::AggregateSignature;
 use ream_post_quantum_crypto::leansig::signature::Signature;
 use ream_storage::{
     db::lean::LeanDB,
@@ -401,15 +403,13 @@ impl Store {
         Ok(self.store.lock().await.head_provider().get()?)
     }
 
+    #[cfg(feature = "devnet1")]
     pub async fn build_block(
         &self,
         slot: u64,
         proposer_index: u64,
         parent_root: B256,
-        #[cfg(feature = "devnet1")] attestations: Option<VariableList<Attestation, U4096>>,
-        #[cfg(feature = "devnet2")] attestations: Option<
-            VariableList<AggregatedAttestations, U4096>,
-        >,
+        attestations: Option<VariableList<Attestation, U4096>>,
     ) -> anyhow::Result<(Block, Vec<Signature>, LeanState)> {
         let (state_provider, latest_known_attestation_provider, block_provider) = {
             let db = self.store.lock().await;
@@ -424,82 +424,28 @@ impl Store {
         let head_state = state_provider
             .get(parent_root)?
             .ok_or(anyhow!("State not found for head root"))?;
-        #[cfg(feature = "devnet1")]
         let mut attestations: VariableList<Attestation, U4096> =
-            attestations.unwrap_or_else(VariableList::empty);
-
-        #[cfg(feature = "devnet2")]
-        let mut attestations: VariableList<AggregatedAttestations, U4096> =
             attestations.unwrap_or_else(VariableList::empty);
 
         let mut signatures: Vec<Signature> = Vec::new();
 
         let (mut candidate_block, signatures, post_state) = loop {
-            #[cfg(feature = "devnet2")]
-            let attestations_list: VariableList<AggregatedAttestation, U4096> = {
-                let mut groups: HashMap<AttestationData, Vec<u64>> = HashMap::new();
-                for attestation in attestations.iter() {
-                    groups
-                        .entry(attestation.data.clone())
-                        .or_default()
-                        .push(attestation.validator_id);
-                }
-
-                VariableList::new(
-                    groups
-                        .into_iter()
-                        .map(|(message, ids)| {
-                            let mut bits = BitList::<U4096>::with_capacity(
-                                ids.iter().max().map_or(0, |&id| id as usize + 1),
-                            )
-                            .map_err(|err| anyhow!("BitList error: {err:?}"))?;
-
-                            for id in ids {
-                                bits.set(id as usize, true)
-                                    .map_err(|err| anyhow!("BitList error: {err:?}"))?;
-                            }
-                            Ok(AggregatedAttestation {
-                                aggregation_bits: bits,
-                                message,
-                            })
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?,
-                )
-                .map_err(|err| anyhow!("Limit exceeded: {err:?}"))?
-            };
             let candidate_block = Block {
                 slot,
                 proposer_index,
                 parent_root,
                 state_root: B256::ZERO,
-                #[cfg(feature = "devnet1")]
                 body: BlockBody {
                     attestations: attestations.clone(),
-                },
-                #[cfg(feature = "devnet2")]
-                body: BlockBody {
-                    attestations: attestations_list.clone(),
                 },
             };
             let mut advanced_state = head_state.clone();
             advanced_state.process_slots(slot)?;
             advanced_state.process_block(&candidate_block)?;
-            #[cfg(feature = "devnet1")]
             let mut new_attestations: VariableList<Attestation, U4096> = VariableList::empty();
-            #[cfg(feature = "devnet2")]
-            let mut new_attestations: VariableList<AggregatedAttestations, U4096> =
-                VariableList::empty();
             let mut new_signatures: Vec<Signature> = Vec::new();
             for signed_attestation in available_signed_attestations.values() {
-                #[cfg(feature = "devnet1")]
                 let data = &signed_attestation.message.data;
-                #[cfg(feature = "devnet2")]
-                let data = &signed_attestation.message;
-                #[cfg(feature = "devnet2")]
-                let attestation = AggregatedAttestations {
-                    validator_id: signed_attestation.validator_id,
-                    data: data.clone(),
-                };
 
                 if !block_provider.contains_key(data.head.root) {
                     continue;
@@ -507,18 +453,9 @@ impl Store {
                 if data.source != advanced_state.latest_justified {
                     continue;
                 }
-                #[cfg(feature = "devnet1")]
                 if !attestations.contains(&signed_attestation.message) {
                     new_attestations
                         .push(signed_attestation.message.clone())
-                        .map_err(|err| anyhow!("Could not append attestation: {err:?}"))?;
-                    new_signatures.push(signed_attestation.signature);
-                }
-
-                #[cfg(feature = "devnet2")]
-                if !attestations.contains(&attestation) {
-                    new_attestations
-                        .push(attestation)
                         .map_err(|err| anyhow!("Could not append attestation: {err:?}"))?;
                     new_signatures.push(signed_attestation.signature);
                 }
@@ -540,6 +477,156 @@ impl Store {
 
         candidate_block.state_root = post_state.tree_hash_root();
         Ok((candidate_block, signatures, post_state))
+    }
+
+    #[cfg(feature = "devnet2")]
+    pub async fn build_block(
+        &self,
+        slot: u64,
+        proposer_index: u64,
+        parent_root: B256,
+        attestations: Option<VariableList<AggregatedAttestations, U4096>>,
+    ) -> anyhow::Result<(Block, Vec<AggregateSignature>, LeanState)> {
+        use ream_post_quantum_crypto::lean_multisig::aggregate::aggregate_signatures;
+
+        let (state_provider, latest_known_attestation_provider, block_provider) = {
+            let db = self.store.lock().await;
+            (
+                db.state_provider(),
+                db.latest_known_attestations_provider(),
+                db.block_provider(),
+            )
+        };
+        let available_signed_attestations =
+            latest_known_attestation_provider.get_all_attestations()?;
+        let head_state = state_provider
+            .get(parent_root)?
+            .ok_or(anyhow!("State not found for head root"))?;
+        let mut attestations: VariableList<AggregatedAttestations, U4096> =
+            attestations.unwrap_or_else(VariableList::empty);
+
+        // Collect individual signatures per validator for later aggregation
+        let mut signatures_map: HashMap<u64, Signature> = HashMap::new();
+
+        let (mut candidate_block, post_state) = loop {
+            // Group attestations by data for aggregation
+            let mut groups: HashMap<AttestationData, Vec<u64>> = HashMap::new();
+            for attestation in attestations.iter() {
+                groups
+                    .entry(attestation.data.clone())
+                    .or_default()
+                    .push(attestation.validator_id);
+            }
+
+            let attestations_list: VariableList<AggregatedAttestation, U4096> = VariableList::new(
+                groups
+                    .into_iter()
+                    .map(|(message, ids)| {
+                        let mut bits = BitList::<U4096>::with_capacity(
+                            ids.iter().max().map_or(0, |&id| id as usize + 1),
+                        )
+                        .map_err(|err| anyhow!("BitList error: {err:?}"))?;
+
+                        for id in ids {
+                            bits.set(id as usize, true)
+                                .map_err(|err| anyhow!("BitList error: {err:?}"))?;
+                        }
+                        Ok(AggregatedAttestation {
+                            aggregation_bits: bits,
+                            message,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            )
+            .map_err(|err| anyhow!("Limit exceeded: {err:?}"))?;
+
+            let candidate_block = Block {
+                slot,
+                proposer_index,
+                parent_root,
+                state_root: B256::ZERO,
+                body: BlockBody {
+                    attestations: attestations_list.clone(),
+                },
+            };
+            let mut advanced_state = head_state.clone();
+            advanced_state.process_slots(slot)?;
+            advanced_state.process_block(&candidate_block)?;
+            let mut new_attestations: VariableList<AggregatedAttestations, U4096> =
+                VariableList::empty();
+            for signed_attestation in available_signed_attestations.values() {
+                let data = &signed_attestation.message;
+                let attestation = AggregatedAttestations {
+                    validator_id: signed_attestation.validator_id,
+                    data: data.clone(),
+                };
+
+                if !block_provider.contains_key(data.head.root) {
+                    continue;
+                }
+                if data.source != advanced_state.latest_justified {
+                    continue;
+                }
+                if !attestations.contains(&attestation) {
+                    new_attestations
+                        .push(attestation)
+                        .map_err(|err| anyhow!("Could not append attestation: {err:?}"))?;
+                    signatures_map.insert(
+                        signed_attestation.validator_id,
+                        signed_attestation.signature,
+                    );
+                }
+            }
+            if new_attestations.is_empty() {
+                break (candidate_block, advanced_state);
+            }
+
+            for attestation in new_attestations {
+                attestations
+                    .push(attestation)
+                    .map_err(|err| anyhow!("Could not append attestation: {err:?}"))?;
+            }
+        };
+
+        // Aggregate signatures per aggregated attestation
+        let mut aggregated_signatures: Vec<AggregateSignature> = Vec::new();
+        for aggregated_attestation in candidate_block.body.attestations.iter() {
+            let validator_ids: Vec<usize> = aggregated_attestation
+                .aggregation_bits
+                .iter()
+                .enumerate()
+                .filter(|(_, bit)| *bit)
+                .map(|(index, _)| index)
+                .collect();
+
+            let public_keys: Vec<_> = validator_ids
+                .iter()
+                .filter_map(|&validator_id| {
+                    head_state
+                        .validators
+                        .get(validator_id)
+                        .map(|validator| validator.public_key)
+                })
+                .collect();
+
+            let sigs: Vec<_> = validator_ids
+                .iter()
+                .filter_map(|&vid| signatures_map.get(&(vid as u64)).cloned())
+                .collect();
+
+            if !sigs.is_empty() && sigs.len() == public_keys.len() {
+                let attestation_root = aggregated_attestation.message.tree_hash_root();
+                let aggregate_sig =
+                    aggregate_signatures(&public_keys, &sigs, &attestation_root, slot as u32)?;
+                aggregated_signatures.push(aggregate_sig);
+            } else {
+                // Create empty aggregate signature for attestations without signatures
+                aggregated_signatures.push(AggregateSignature::new(vec![], vec![]));
+            }
+        }
+
+        candidate_block.state_root = post_state.tree_hash_root();
+        Ok((candidate_block, aggregated_signatures, post_state))
     }
 
     pub async fn produce_block_with_signatures(
@@ -676,10 +763,9 @@ impl Store {
                 "Attestation signature groups must match aggregated attestations"
             );
 
-            for (aggregated_attestation, aggregated_signature) in aggregated_attestations
-                .into_iter()
-                .zip(attestation_signatures)
-            {
+            // Process each aggregated attestation for fork choice
+            // Signatures were already verified at block level via verify_signatures()
+            for aggregated_attestation in aggregated_attestations.iter() {
                 let validator_ids: Vec<u64> = aggregated_attestation
                     .aggregation_bits
                     .iter()
@@ -688,19 +774,14 @@ impl Store {
                     .map(|(index, _)| index as u64)
                     .collect();
 
-                ensure!(
-                    validator_ids.len() == aggregated_signature.inner.len(),
-                    "Aggregated attestation signature count mismatch"
-                );
-
-                for (validator_id, signature) in
-                    validator_ids.into_iter().zip(attestation_signatures)
-                {
+                // Process each validator's attestation for fork choice
+                for validator_id in validator_ids {
                     self.on_attestation(
                         SignedAttestation {
                             validator_id,
                             message: aggregated_attestation.message.clone(),
-                            signature: *signature,
+                            // Signature already verified at block level, use blank for fork choice
+                            signature: Signature::blank(),
                         },
                         true,
                     )
@@ -966,6 +1047,8 @@ mod tests {
     };
     use ream_consensus_misc::constants::lean::INTERVALS_PER_SLOT;
     use ream_network_spec::networks::{LeanNetworkSpec, lean_network_spec, set_lean_network_spec};
+    #[cfg(feature = "devnet2")]
+    use ream_post_quantum_crypto::lean_multisig::aggregate::AggregateSignature;
     use ream_post_quantum_crypto::leansig::signature::Signature;
     use ream_storage::{
         db::{ReamDB, lean::LeanDB},
@@ -1019,6 +1102,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "devnet1")]
     pub fn build_signed_block_with_attestation(
         attestation_data: AttestationData,
         block: Block,
@@ -1027,23 +1111,32 @@ mod tests {
         signatures.push(Signature::blank()).unwrap();
         SignedBlockWithAttestation {
             message: BlockWithAttestation {
-                #[cfg(feature = "devnet1")]
                 proposer_attestation: Attestation {
                     validator_id: block.proposer_index,
                     data: attestation_data,
                 },
-                #[cfg(feature = "devnet2")]
+                block,
+            },
+            signature: signatures,
+        }
+    }
+
+    #[cfg(feature = "devnet2")]
+    pub fn build_signed_block_with_attestation(
+        attestation_data: AttestationData,
+        block: Block,
+        attestation_signatures: VariableList<AggregateSignature, U4096>,
+    ) -> SignedBlockWithAttestation {
+        SignedBlockWithAttestation {
+            message: BlockWithAttestation {
                 proposer_attestation: AggregatedAttestations {
                     validator_id: block.proposer_index,
                     data: attestation_data,
                 },
                 block,
             },
-            #[cfg(feature = "devnet1")]
-            signature: signatures,
-            #[cfg(feature = "devnet2")]
             signature: BlockSignatures {
-                attestation_signatures: signatures,
+                attestation_signatures,
                 proposer_signature: Signature::blank(),
             },
         }
