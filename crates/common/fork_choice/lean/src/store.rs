@@ -768,7 +768,7 @@ impl Store {
             slot,
             proposer_index,
             parent_root,
-            state_root: B256::ZERO,
+            state_root: post_state.tree_hash_root(),
             body: BlockBody {
                 attestations: attestations_list,
             },
