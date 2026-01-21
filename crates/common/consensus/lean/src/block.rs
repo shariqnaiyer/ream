@@ -13,7 +13,7 @@ use tree_hash_derive::TreeHash;
 #[cfg(feature = "devnet1")]
 use crate::attestation::Attestation;
 #[cfg(feature = "devnet2")]
-use crate::attestation::{AggregatedAttestation, AggregatedAttestations, AggregatedSignatureProof};
+use crate::attestation::{AggregatedAttestation, AggregatedAttestations, AttestationProofs};
 use crate::state::LeanState;
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -21,7 +21,7 @@ pub struct BlockSignatures {
     #[cfg(feature = "devnet1")]
     pub attestation_signatures: VariableList<Signature, U4096>,
     #[cfg(feature = "devnet2")]
-    pub attestation_signatures: VariableList<AggregatedSignatureProof, U4096>,
+    pub attestation_signatures: VariableList<AttestationProofs, U4096>,
     pub proposer_signature: Signature,
 }
 
@@ -96,52 +96,77 @@ impl SignedBlockWithAttestation {
 
         #[cfg(feature = "devnet2")]
         {
-            for (aggregated_attestation, aggregated_signature) in aggregated_attestations
+            for (aggregated_attestation, attestation_proofs) in aggregated_attestations
                 .iter()
                 .zip(attestation_signatures.iter())
             {
-                let validator_ids: Vec<usize> = aggregated_attestation
-                    .aggregation_bits
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, bit)| *bit)
-                    .map(|(index, _)| index)
-                    .collect();
+                let expected_validator_ids: std::collections::HashSet<usize> =
+                    aggregated_attestation
+                        .aggregation_bits
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, bit)| *bit)
+                        .map(|(index, _)| index)
+                        .collect();
 
                 let attestation_root = aggregated_attestation.message.tree_hash_root();
 
                 // Validate all validator indices are in range
-                for &validator_id in &validator_ids {
+                for &validator_id in &expected_validator_ids {
                     ensure!(
                         validator_id < validators.len(),
                         "Validator index out of range"
                     );
                 }
 
-                // Collect public keys for all validators in this aggregation
-                let public_keys: Vec<_> = validator_ids
-                    .iter()
-                    .map(|&validator_id| {
-                        validators
-                            .get(validator_id)
-                            .map(|validator| validator.public_key)
-                            .ok_or_else(|| anyhow!("Failed to get validator {validator_id}"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                // Track which validators are covered by proofs
+                let mut covered_validators: std::collections::HashSet<usize> =
+                    std::collections::HashSet::new();
 
-                if verify_signatures {
-                    let timer = start_timer(&PQ_SIGNATURE_ATTESTATION_VERIFICATION_TIME, &[]);
-                    verify_aggregate_signature(
-                        &public_keys,
-                        &attestation_root,
-                        &aggregated_signature.proof,
-                        aggregated_attestation.message.slot as u32,
-                    )
-                    .map_err(|err| {
-                        anyhow!("Attestation aggregated signature verification failed: {err}")
-                    })?;
-                    stop_timer(timer);
+                // Verify each proof in this attestation
+                for aggregated_signature in attestation_proofs.proofs.iter() {
+                    let proof_validator_ids: Vec<usize> = aggregated_signature
+                        .participants
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, bit)| *bit)
+                        .map(|(index, _)| index)
+                        .collect();
+
+                    // Collect public keys for validators in this proof
+                    let public_keys: Vec<_> = proof_validator_ids
+                        .iter()
+                        .map(|&validator_id| {
+                            validators
+                                .get(validator_id)
+                                .map(|validator| validator.public_key)
+                                .ok_or_else(|| anyhow!("Failed to get validator {validator_id}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    if verify_signatures {
+                        let timer = start_timer(&PQ_SIGNATURE_ATTESTATION_VERIFICATION_TIME, &[]);
+                        verify_aggregate_signature(
+                            &public_keys,
+                            &attestation_root,
+                            &aggregated_signature.proof,
+                            aggregated_attestation.message.slot as u32,
+                        )
+                        .map_err(|err| {
+                            anyhow!("Attestation aggregated signature verification failed: {err}")
+                        })?;
+                        stop_timer(timer);
+                    }
+
+                    // Mark these validators as covered
+                    covered_validators.extend(proof_validator_ids);
                 }
+
+                // Ensure all validators in aggregation_bits are covered by proofs
+                ensure!(
+                    covered_validators == expected_validator_ids,
+                    "Proofs do not cover all validators in aggregation_bits"
+                );
             }
 
             let proposer_attestation = &self.message.proposer_attestation;
@@ -231,7 +256,7 @@ pub struct BlockWithSignatures {
     #[cfg(feature = "devnet1")]
     pub signatures: VariableList<Signature, U4096>,
     #[cfg(feature = "devnet2")]
-    pub signatures: VariableList<AggregatedSignatureProof, U4096>,
+    pub signatures: VariableList<AttestationProofs, U4096>,
 }
 
 #[cfg(test)]

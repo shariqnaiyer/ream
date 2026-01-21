@@ -8,7 +8,8 @@ use anyhow::{anyhow, ensure};
 use ream_consensus_lean::attestation::Attestation;
 #[cfg(feature = "devnet2")]
 use ream_consensus_lean::attestation::{
-    AggregatedAttestation, AggregatedAttestations, AggregatedSignatureProof, SignatureKey,
+    AggregatedAttestation, AggregatedAttestations, AggregatedSignatureProof, AttestationProofs,
+    SignatureKey,
 };
 use ream_consensus_lean::{
     attestation::{AttestationData, SignedAttestation},
@@ -495,7 +496,7 @@ impl Store {
         attestations: &[AggregatedAttestations],
         gossip_signatures_provider: &GossipSignaturesTable,
         aggregated_payloads_provider: &AggregatedPayloadsTable,
-    ) -> anyhow::Result<(Vec<AggregatedAttestation>, Vec<AggregatedSignatureProof>)> {
+    ) -> anyhow::Result<(Vec<AggregatedAttestation>, Vec<AttestationProofs>)> {
         let mut groups: HashMap<AttestationData, Vec<u64>> = HashMap::new();
         for attestation in attestations.iter() {
             groups
@@ -504,7 +505,7 @@ impl Store {
                 .push(attestation.validator_id);
         }
 
-        let mut results = Vec::new();
+        let mut results: Vec<(AggregatedAttestation, AttestationProofs)> = Vec::new();
 
         // Sort groups by AttestationData hash for deterministic ordering
         let mut sorted_groups: Vec<_> = groups.into_iter().collect();
@@ -513,12 +514,16 @@ impl Store {
         for (data, validator_ids) in sorted_groups {
             let data_root = data.tree_hash_root();
 
+            // Collect all proofs for this attestation data
+            let mut proofs_for_data: Vec<AggregatedSignatureProof> = Vec::new();
+            let mut all_covered_ids: HashSet<u64> = HashSet::new();
+
             // Phase 1: Gossip Collection
             // Collect individual XMSS signatures from the gossip network
             let mut gossip_signatures = Vec::new();
             let mut gossip_keys = Vec::new();
             let mut gossip_ids = Vec::new();
-            let mut remaining = HashSet::new();
+            let mut remaining: HashSet<u64> = validator_ids.iter().copied().collect();
 
             for &validator_id in &validator_ids {
                 if let Ok(Some(signature)) = gossip_signatures_provider
@@ -529,8 +534,6 @@ impl Store {
                         gossip_keys.push(validator.public_key);
                     }
                     gossip_ids.push(validator_id);
-                } else {
-                    remaining.insert(validator_id);
                 }
             }
 
@@ -553,13 +556,12 @@ impl Store {
                     data.slot as u32,
                 )?;
 
-                results.push((
-                    AggregatedAttestation {
-                        aggregation_bits: bits.clone(),
-                        message: data.clone(),
-                    },
-                    AggregatedSignatureProof::new(bits, aggregate_signatures),
-                ));
+                proofs_for_data.push(AggregatedSignatureProof::new(bits, aggregate_signatures));
+                all_covered_ids.extend(&gossip_ids);
+                remaining = remaining
+                    .difference(&gossip_ids.iter().copied().collect())
+                    .copied()
+                    .collect();
             }
 
             // Phase 2: Fallback to existing proofs using greedy set-cover
@@ -568,25 +570,24 @@ impl Store {
                     .get(SignatureKey::from_parts(target_id, data_root))
                 {
                     Ok(Some(payloads)) => payloads.proofs.to_vec(),
-                    _ => break,
+                    _ => {
+                        // Skip this validator if no payloads found, continue with others
+                        remaining.remove(&target_id);
+                        continue;
+                    }
                 };
 
                 if candidates.is_empty() {
-                    break;
+                    remaining.remove(&target_id);
+                    continue;
                 }
 
-                let mut best_proof = None;
+                let mut best_proof: Option<AggregatedSignatureProof> = None;
                 let mut best_covered = HashSet::new();
 
-                for proof in &candidates {
-                    let covered = proof
-                        .to_validator_indices()
-                        .into_iter()
-                        .collect::<HashSet<u64>>();
-                    let overlap = covered
-                        .intersection(&remaining)
-                        .copied()
-                        .collect::<HashSet<u64>>();
+                for proof in candidates {
+                    let covered: HashSet<u64> = proof.to_validator_indices().into_iter().collect();
+                    let overlap: HashSet<u64> = covered.intersection(&remaining).copied().collect();
                     if overlap.len() > best_covered.len() {
                         best_proof = Some(proof);
                         best_covered = overlap;
@@ -594,19 +595,45 @@ impl Store {
                 }
 
                 if best_covered.is_empty() {
-                    break;
+                    remaining.remove(&target_id);
+                    continue;
                 }
 
                 if let Some(proof) = best_proof {
-                    results.push((
-                        AggregatedAttestation {
-                            aggregation_bits: proof.participants.clone(),
-                            message: data.clone(),
-                        },
-                        proof.clone(),
-                    ));
+                    proofs_for_data.push(proof);
+                    all_covered_ids.extend(&best_covered);
                     remaining = remaining.difference(&best_covered).copied().collect();
                 }
+            }
+
+            // Only include this attestation if we have proofs for it
+            if !proofs_for_data.is_empty() {
+                // Create aggregation_bits covering all validators we have proofs for
+                let max_id = all_covered_ids
+                    .iter()
+                    .max()
+                    .map_or(0, |&id| id as usize + 1);
+                let mut aggregation_bits = BitList::<U4096>::with_capacity(max_id)
+                    .map_err(|err| anyhow!("BitList error: {err:?}"))?;
+
+                for id in &all_covered_ids {
+                    aggregation_bits
+                        .set(*id as usize, true)
+                        .map_err(|err| anyhow!("BitList error: {err:?}"))?;
+                }
+
+                let proofs_list = VariableList::new(proofs_for_data)
+                    .map_err(|err| anyhow!("VariableList error: {err:?}"))?;
+
+                results.push((
+                    AggregatedAttestation {
+                        aggregation_bits,
+                        message: data,
+                    },
+                    AttestationProofs {
+                        proofs: proofs_list,
+                    },
+                ));
             }
         }
 
@@ -626,7 +653,7 @@ impl Store {
         proposer_index: u64,
         parent_root: B256,
         attestations: Option<VariableList<AggregatedAttestations, U4096>>,
-    ) -> anyhow::Result<(Block, Vec<AggregatedSignatureProof>, LeanState)> {
+    ) -> anyhow::Result<(Block, Vec<AttestationProofs>, LeanState)> {
         let (
             state_provider,
             latest_known_attestation_provider,
@@ -651,7 +678,7 @@ impl Store {
         let mut attestations: VariableList<AggregatedAttestations, U4096> =
             attestations.unwrap_or_else(VariableList::empty);
 
-        loop {
+        let (final_state, final_block) = loop {
             let mut groups: HashMap<AttestationData, Vec<u64>> = HashMap::new();
             for attestation in attestations.iter() {
                 groups
@@ -660,8 +687,13 @@ impl Store {
                     .push(attestation.validator_id);
             }
 
+            // Sort groups by AttestationData hash for deterministic ordering
+            // (must match compute_aggregated_signatures ordering)
+            let mut sorted_groups: Vec<_> = groups.into_iter().collect();
+            sorted_groups.sort_by_key(|(data, _)| data.tree_hash_root());
+
             let attestations_list = VariableList::new(
-                groups
+                sorted_groups
                     .into_iter()
                     .map(|(message, ids)| {
                         let mut bits = BitList::<U4096>::with_capacity(
@@ -721,17 +753,23 @@ impl Store {
                     continue;
                 }
 
-                if gossip_signatures_provider
+                // Only include validator if we can actually provide a signature:
+                // - gossip_signatures_provider has their signature, OR
+                // - aggregated_payloads_provider has their payload with non-empty proofs
+                let has_gossip_sig = gossip_signatures_provider
                     .get(signature_key.clone())
                     .ok()
                     .flatten()
-                    .is_some()
-                    || aggregated_payloads_provider
-                        .get(signature_key.clone())
-                        .ok()
-                        .flatten()
-                        .is_some()
-                {
+                    .is_some();
+
+                let has_usable_payload = aggregated_payloads_provider
+                    .get(signature_key.clone())
+                    .ok()
+                    .flatten()
+                    .map(|payload| !payload.proofs.is_empty())
+                    .unwrap_or(false);
+
+                if has_gossip_sig || has_usable_payload {
                     new_attestations
                         .push(attestation)
                         .map_err(|err| anyhow!("Could not append attestation: {err:?}"))?;
@@ -739,7 +777,8 @@ impl Store {
             }
 
             if new_attestations.is_empty() {
-                break;
+                // No more attestations can be added - this is our final state
+                break (advanced_state, candidate_block);
             }
 
             for attestation in new_attestations {
@@ -747,43 +786,28 @@ impl Store {
                     .push(attestation)
                     .map_err(|err| anyhow!("Could not append attestation: {err:?}"))?;
             }
-        }
+        };
 
+        // Get the proofs for the attestations (structure matches loop's attestations)
         let attestations_vec: Vec<_> = attestations.to_vec();
-        let (aggregated_attestations, aggregated_proofs) = self.compute_aggregated_signatures(
+        let (_, aggregated_proofs) = self.compute_aggregated_signatures(
             &head_state,
             &attestations_vec,
             &gossip_signatures_provider,
             &aggregated_payloads_provider,
         )?;
 
-        let attestations_list =
-            VariableList::new(aggregated_attestations).map_err(|err| anyhow!("{err:?}"))?;
-
-        let candidate_final_block = Block {
-            slot,
-            proposer_index,
-            parent_root,
-            state_root: B256::ZERO,
-            body: BlockBody {
-                attestations: attestations_list,
-            },
-        };
-
-        let mut post_state = head_state.clone();
-        post_state.process_slots(slot)?;
-        post_state.process_block(&candidate_final_block)?;
-
+        // Reuse the loop's state - no need to recompute since attestation structure matches
         Ok((
             Block {
                 slot,
                 proposer_index,
                 parent_root,
-                state_root: post_state.tree_hash_root(),
-                body: candidate_final_block.body,
+                state_root: final_state.tree_hash_root(),
+                body: final_block.body,
             },
             aggregated_proofs,
-            post_state,
+            final_state,
         ))
     }
 
@@ -939,7 +963,7 @@ impl Store {
                 self.store.lock().await.aggregated_payloads_provider();
 
             // Process each aggregated attestation for fork choice and store proofs
-            for (aggregated_attestation, aggregated_proof) in aggregated_attestations
+            for (aggregated_attestation, attestation_proofs) in aggregated_attestations
                 .iter()
                 .zip(attestation_signatures.iter())
             {
@@ -953,14 +977,16 @@ impl Store {
 
                 // Process each validator's attestation for fork choice and store proofs
                 for validator_id in validator_ids {
-                    // Store the aggregated proof with participants for this validator
-                    aggregated_payloads_provider.append_proof(
-                        SignatureKey::from_parts(
-                            validator_id,
-                            aggregated_attestation.message.tree_hash_root(),
-                        ),
-                        aggregated_proof.clone(),
-                    )?;
+                    // Store all proofs for this validator (gossip + fallback proofs)
+                    for proof in attestation_proofs.proofs.iter() {
+                        aggregated_payloads_provider.append_proof(
+                            SignatureKey::from_parts(
+                                validator_id,
+                                aggregated_attestation.message.tree_hash_root(),
+                            ),
+                            proof.clone(),
+                        )?;
+                    }
 
                     self.on_attestation(
                         SignedAttestation {
@@ -1237,6 +1263,8 @@ mod tests {
     use alloy_primitives::{B256, FixedBytes};
     #[cfg(feature = "devnet1")]
     use ream_consensus_lean::attestation::Attestation;
+    #[cfg(feature = "devnet2")]
+    use ream_consensus_lean::attestation::AttestationProofs;
     #[cfg(feature = "devnet1")]
     use ream_consensus_lean::block::{BlockBody, BlockHeader};
     #[cfg(feature = "devnet1")]
@@ -1245,9 +1273,7 @@ mod tests {
     use ream_consensus_lean::validator::Validator;
     #[cfg(feature = "devnet2")]
     use ream_consensus_lean::{
-        attestation::{
-            AggregatedAttestation, AggregatedAttestations, AggregatedSignatureProof, SignatureKey,
-        },
+        attestation::{AggregatedAttestation, AggregatedAttestations, SignatureKey},
         block::BlockSignatures,
     };
     use ream_consensus_lean::{
@@ -1338,7 +1364,7 @@ mod tests {
     pub fn build_signed_block_with_attestation(
         attestation_data: AttestationData,
         block: Block,
-        attestation_signatures: VariableList<AggregatedSignatureProof, U4096>,
+        attestation_signatures: VariableList<AttestationProofs, U4096>,
     ) -> SignedBlockWithAttestation {
         SignedBlockWithAttestation {
             message: BlockWithAttestation {

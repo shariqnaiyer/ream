@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, ensure};
 #[cfg(feature = "devnet2")]
 use ream_consensus_lean::attestation::AggregatedAttestations;
 #[cfg(feature = "devnet2")]
-use ream_consensus_lean::attestation::AggregatedSignatureProof;
+use ream_consensus_lean::attestation::{AggregatedSignatureProof, AttestationProofs};
 #[cfg(feature = "devnet1")]
 use ream_consensus_lean::attestation::Attestation;
 #[cfg(feature = "devnet2")]
@@ -195,18 +195,22 @@ pub async fn run_fork_choice_test(test_name: &str, test: ForkChoiceTest) -> anyh
                 };
                 #[cfg(feature = "devnet2")]
                 let signatures = {
-                    // devnet2: one aggregated signature proof per aggregated attestation
+                    // devnet2: one AttestationProofs (with potentially multiple proofs) per aggregated attestation
                     let num_signatures = ream_block.body.attestations.len();
-                    let empty_proof = || {
-                        AggregatedSignatureProof::new(
+                    let empty_attestation_proofs = || {
+                        let empty_proof = AggregatedSignatureProof::new(
                             BitList::<U4096>::with_capacity(0)
                                 .expect("Failed to create empty BitList"),
                             AggregateSignature::new(vec![], vec![]),
-                        )
+                        );
+                        AttestationProofs {
+                            proofs: VariableList::try_from(vec![empty_proof])
+                                .expect("Failed to create proofs VariableList"),
+                        }
                     };
                     VariableList::try_from(
                         (0..num_signatures)
-                            .map(|_| empty_proof())
+                            .map(|_| empty_attestation_proofs())
                             .collect::<Vec<_>>(),
                     )
                     .map_err(|err| anyhow!("Failed to create signatures VariableList: {err}"))?

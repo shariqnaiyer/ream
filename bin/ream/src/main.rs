@@ -895,8 +895,8 @@ mod tests {
                 run_lean_node(*config, executor_handle, cloned_db).await;
             });
 
-            let result = timeout(Duration::from_secs(120), async {
-                sleep(Duration::from_secs(120)).await;
+            let result = timeout(Duration::from_secs(60), async {
+                sleep(Duration::from_secs(60)).await;
                 Ok::<_, ()>(())
             })
             .await;
