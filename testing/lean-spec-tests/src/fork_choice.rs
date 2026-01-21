@@ -3,10 +3,10 @@ use std::path::Path;
 use anyhow::{anyhow, bail, ensure};
 #[cfg(feature = "devnet2")]
 use ream_consensus_lean::attestation::AggregatedAttestations;
-#[cfg(feature = "devnet2")]
-use ream_consensus_lean::attestation::{AggregatedSignatureProof, AttestationProofs};
 #[cfg(feature = "devnet1")]
 use ream_consensus_lean::attestation::Attestation;
+#[cfg(feature = "devnet2")]
+use ream_consensus_lean::attestation::{AggregatedSignatureProof, AttestationProofs};
 #[cfg(feature = "devnet2")]
 use ream_consensus_lean::block::BlockSignatures;
 use ream_consensus_lean::{
@@ -195,7 +195,8 @@ pub async fn run_fork_choice_test(test_name: &str, test: ForkChoiceTest) -> anyh
                 };
                 #[cfg(feature = "devnet2")]
                 let signatures = {
-                    // devnet2: one AttestationProofs (with potentially multiple proofs) per aggregated attestation
+                    // devnet2: one AttestationProofs (with potentially multiple proofs) per
+                    // aggregated attestation
                     let num_signatures = ream_block.body.attestations.len();
                     let empty_attestation_proofs = || {
                         let empty_proof = AggregatedSignatureProof::new(
