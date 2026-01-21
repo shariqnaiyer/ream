@@ -914,7 +914,7 @@ mod tests {
         let head = lean_db.head_provider().get().unwrap();
         let head_state = lean_db.state_provider().get(head).unwrap().unwrap();
 
-        let justfication_lag = 4;
+        let justfication_lag = 2;
         let finalization_lag = 5;
 
         assert!(
