@@ -505,13 +505,13 @@ impl Store {
                 .push(attestation.validator_id);
         }
 
-        let mut results: Vec<(AggregatedAttestation, AttestationProofs)> = Vec::new();
+        let mut results = Vec::new();
 
         for (data, validator_ids) in groups {
             let data_root = data.tree_hash_root();
 
             // Collect all proofs for this attestation data
-            let mut proofs_for_data: Vec<AggregatedSignatureProof> = Vec::new();
+            let mut proofs_for_data = Vec::new();
             let mut all_covered_ids: HashSet<u64> = HashSet::new();
 
             // Phase 1: Gossip Collection
@@ -519,7 +519,7 @@ impl Store {
             let mut gossip_signatures = Vec::new();
             let mut gossip_keys = Vec::new();
             let mut gossip_ids = Vec::new();
-            let mut remaining: HashSet<u64> = validator_ids.iter().copied().collect();
+            let mut remaining = validator_ids.iter().copied().collect::<HashSet<u64>>();
 
             for &validator_id in &validator_ids {
                 if let Ok(Some(signature)) = gossip_signatures_provider
