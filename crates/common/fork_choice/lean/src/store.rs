@@ -621,7 +621,7 @@ impl Store {
         slot: u64,
         proposer_index: u64,
         parent_root: B256,
-        attestations: Option<VariableList<AggregatedAttestations, U4096>>,
+        _attestations: Option<VariableList<AggregatedAttestations, U4096>>,
     ) -> anyhow::Result<(Block, Vec<AggregatedSignatureProof>, LeanState)> {
         let (
             state_provider,
@@ -639,116 +639,62 @@ impl Store {
                 db.aggregated_payloads_provider(),
             )
         };
-        let available_signed_attestations =
-            latest_known_attestation_provider.get_all_attestations()?;
+
         let head_state = state_provider
             .get(parent_root)?
             .ok_or(anyhow!("State not found for head root"))?;
-        let mut attestations: VariableList<AggregatedAttestations, U4096> =
-            attestations.unwrap_or_else(VariableList::empty);
 
-        loop {
-            let mut groups: HashMap<AttestationData, Vec<u64>> = HashMap::new();
-            for attestation in attestations.iter() {
-                groups
-                    .entry(attestation.data.clone())
-                    .or_default()
-                    .push(attestation.validator_id);
+        let mut advanced_state = head_state.clone();
+        advanced_state.process_slots(slot)?;
+        advanced_state.process_block(&Block {
+            slot,
+            proposer_index,
+            parent_root,
+            state_root: B256::ZERO,
+            body: BlockBody {
+                attestations: VariableList::empty(),
+            },
+        })?;
+
+        let available_signed_attestations =
+            latest_known_attestation_provider.get_all_attestations()?;
+
+        let mut proposal_attestations: Vec<AggregatedAttestations> = Vec::new();
+        for signed_attestation in available_signed_attestations.values() {
+            let data = &signed_attestation.message;
+            let validator_id = signed_attestation.validator_id;
+            let data_root = data.tree_hash_root();
+            let signature_key = SignatureKey::from_parts(validator_id, data_root);
+
+            if !block_provider.contains_key(data.head.root) {
+                continue;
             }
 
-            let attestations_list = VariableList::new(
-                groups
-                    .into_iter()
-                    .map(|(message, ids)| {
-                        let mut bits = BitList::<U4096>::with_capacity(
-                            ids.iter().max().map_or(0, |&id| id as usize + 1),
-                        )
-                        .map_err(|err| anyhow!("BitList error: {err:?}"))?;
+            if data.source != advanced_state.latest_justified {
+                continue;
+            }
 
-                        for id in ids {
-                            bits.set(id as usize, true)
-                                .map_err(|err| anyhow!("BitList error: {err:?}"))?;
-                        }
-                        Ok(AggregatedAttestation {
-                            aggregation_bits: bits,
-                            message,
-                        })
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?,
-            )
-            .map_err(|err| anyhow!("Limit exceeded: {err:?}"))?;
-
-            let candidate_block = Block {
-                slot,
-                proposer_index,
-                parent_root,
-                state_root: B256::ZERO,
-                body: BlockBody {
-                    attestations: attestations_list,
-                },
-            };
-            let mut advanced_state = head_state.clone();
-            advanced_state.process_slots(slot)?;
-            advanced_state.process_block(&candidate_block)?;
-
-            let mut new_attestations: VariableList<AggregatedAttestations, U4096> =
-                VariableList::empty();
-
-            for signed_attestation in available_signed_attestations.values() {
-                let data = &signed_attestation.message;
-                let validator_id = signed_attestation.validator_id;
-                let data_root = data.tree_hash_root();
-                let signature_key = SignatureKey::from_parts(validator_id, data_root);
-
-                let attestation = AggregatedAttestations {
-                    validator_id,
-                    data: data.clone(),
-                };
-
-                if !block_provider.contains_key(data.head.root) {
-                    continue;
-                }
-
-                if data.source != advanced_state.latest_justified {
-                    continue;
-                }
-
-                if attestations.contains(&attestation) {
-                    continue;
-                }
-
-                if gossip_signatures_provider
-                    .get(signature_key.clone())
+            if gossip_signatures_provider
+                .get(signature_key.clone())
+                .ok()
+                .flatten()
+                .is_some()
+                || aggregated_payloads_provider
+                    .get(signature_key)
                     .ok()
                     .flatten()
                     .is_some()
-                    || aggregated_payloads_provider
-                        .get(signature_key.clone())
-                        .ok()
-                        .flatten()
-                        .is_some()
-                {
-                    new_attestations
-                        .push(attestation)
-                        .map_err(|err| anyhow!("Could not append attestation: {err:?}"))?;
-                }
-            }
-
-            if new_attestations.is_empty() {
-                break;
-            }
-
-            for attestation in new_attestations {
-                attestations
-                    .push(attestation)
-                    .map_err(|err| anyhow!("Could not append attestation: {err:?}"))?;
+            {
+                proposal_attestations.push(AggregatedAttestations {
+                    validator_id,
+                    data: data.clone(),
+                });
             }
         }
 
-        let attestations_vec: Vec<_> = attestations.to_vec();
         let (aggregated_attestations, aggregated_proofs) = self.compute_aggregated_signatures(
             &head_state,
-            &attestations_vec,
+            &proposal_attestations,
             &gossip_signatures_provider,
             &aggregated_payloads_provider,
         )?;
@@ -756,7 +702,7 @@ impl Store {
         let attestations_list =
             VariableList::new(aggregated_attestations).map_err(|err| anyhow!("{err:?}"))?;
 
-        let candidate_final_block = Block {
+        let mut block = Block {
             slot,
             proposer_index,
             parent_root,
@@ -768,19 +714,11 @@ impl Store {
 
         let mut post_state = head_state.clone();
         post_state.process_slots(slot)?;
-        post_state.process_block(&candidate_final_block)?;
+        post_state.process_block(&block)?;
 
-        Ok((
-            Block {
-                slot,
-                proposer_index,
-                parent_root,
-                state_root: post_state.tree_hash_root(),
-                body: candidate_final_block.body,
-            },
-            aggregated_proofs,
-            post_state,
-        ))
+        block.state_root = post_state.tree_hash_root();
+
+        Ok((block, aggregated_proofs, post_state))
     }
 
     pub async fn produce_block_with_signatures(
