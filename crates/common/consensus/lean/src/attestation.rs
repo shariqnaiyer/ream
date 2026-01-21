@@ -68,6 +68,13 @@ impl AggregatedSignatureProof {
     }
 }
 
+/// Multiple proofs for a single attestation (gossip + fallback proofs combined)
+#[cfg(feature = "devnet2")]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct AttestationProofs {
+    pub proofs: VariableList<AggregatedSignatureProof, U4096>,
+}
+
 /// Attestation content describing the validator's observed chain view.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash, Hash)]
 pub struct AttestationData {

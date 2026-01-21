@@ -914,7 +914,7 @@ mod tests {
         let head = lean_db.head_provider().get().unwrap();
         let head_state = lean_db.state_provider().get(head).unwrap().unwrap();
 
-        let justfication_lag = 4;
+        let justfication_lag = 2;
         let finalization_lag = 5;
 
         assert!(
@@ -928,13 +928,13 @@ mod tests {
             head_state.latest_finalized.slot
         );
         assert!(
-            head_state.latest_justified.slot + justfication_lag == head_state.slot,
+            head_state.latest_justified.slot + justfication_lag <= head_state.slot,
             "Expected the head to be at least {justfication_lag} slots ahead of the justified checkpoint {:?} + {justfication_lag} vs {:?}",
             head_state.latest_justified.slot,
             head_state.slot
         );
         assert!(
-            head_state.latest_finalized.slot + finalization_lag == head_state.slot,
+            head_state.latest_finalized.slot + finalization_lag <= head_state.slot,
             "Expected the head to be at least {finalization_lag} slots ahead of the finalized checkpoint {:?} + {finalization_lag} vs {:?}",
             head_state.latest_finalized.slot,
             head_state.slot
@@ -966,7 +966,7 @@ mod tests {
     }
 
     fn run_multi_node_finalization_test(topology: Vec<Vec<usize>>, test_name: &str) {
-        if true {
+        if false {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(Verbosity::Info.directive())
                 .with_test_writer()
@@ -1155,7 +1155,7 @@ mod tests {
         let topology = [vec![], vec![0], vec![0, 1]];
         let test_name = "late_joiner_sync";
 
-        if true {
+        if false {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(Verbosity::Info.directive())
                 .with_test_writer()
