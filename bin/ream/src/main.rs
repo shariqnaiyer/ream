@@ -1167,7 +1167,7 @@ mod tests {
             test_name
         );
 
-        let test_duration_secs = 120;
+        let test_duration_secs = 300;
         let late_start_delay = 50;
         let base_p2p_port = 21600;
         let base_http_port = 17652;
