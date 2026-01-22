@@ -50,11 +50,13 @@ impl ForwardBackgroundSyncer {
                     let last_block = last_block.ok_or_else(|| {
                         anyhow!("Failed to find block with root {next_root:?} in pending blocks")
                     })?;
+                    // Queue the MISSING parent root, not the block we already have
+                    // The slot is estimated as last_block.slot - 1 (may not be exact if slots were skipped)
                     return Ok(ForwardSyncResults::ChainIncomplete {
                         prevous_queue: self.job_queue.clone(),
                         checkpoint_for_new_queue: Checkpoint {
-                            root: last_block.message.block.tree_hash_root(),
-                            slot: last_block.message.block.slot,
+                            root: next_root, // This is the parent root we couldn't find
+                            slot: last_block.message.block.slot.saturating_sub(1),
                         },
                     });
                 }

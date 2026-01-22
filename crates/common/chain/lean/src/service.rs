@@ -215,10 +215,7 @@ impl LeanChainService {
                             }
                         }
                         LeanChainServiceMessage::ProcessBlock { signed_block_with_attestation, need_gossip } => {
-                            if self.sync_status != SyncStatus::Synced {
-                                trace!("Received ProcessBlock request while syncing. Ignoring.");
-                                continue;
-                            }
+                            let is_syncing = self.sync_status != SyncStatus::Synced;
 
                             if enabled!(Level::DEBUG) {
                                 debug!(
@@ -241,9 +238,24 @@ impl LeanChainService {
 
                             if let Err(err) = self.handle_process_block(&signed_block_with_attestation).await {
                                 warn!("Failed to handle process block message: {err:?}");
+                                // If we failed due to missing parent state, queue the block for syncing
+                                let err_str = format!("{err:?}");
+                                if err_str.contains("State not found") || err_str.contains("parent") {
+                                    let block_root = signed_block_with_attestation.message.block.tree_hash_root();
+                                    let block_slot = signed_block_with_attestation.message.block.slot;
+                                    info!(
+                                        slot = block_slot,
+                                        block_root = ?block_root,
+                                        "Queueing block for sync due to missing parent state"
+                                    );
+                                    self.checkpoints_to_queue.push((
+                                        Checkpoint { root: block_root, slot: block_slot },
+                                        true, // bypass_slot_check
+                                    ));
+                                }
                             }
 
-                            if need_gossip && let Err(err) = self.outbound_p2p.send(LeanP2PRequest::GossipBlock(signed_block_with_attestation)) {
+                            if need_gossip && !is_syncing && let Err(err) = self.outbound_p2p.send(LeanP2PRequest::GossipBlock(signed_block_with_attestation)) {
                                 warn!("Failed to send item to outbound gossip channel: {err:?}");
                             }
                         }
@@ -492,28 +504,21 @@ impl LeanChainService {
         self.queue_pending_job_requests().await?;
 
         // start new queue from peers status
-        let common_highest_checkpoint = match self.network_state.common_highest_checkpoint() {
-            Some(checkpoint) => checkpoint,
-            None => {
-                warn!("No common highest checkpoint found among connected peers.");
-                return Ok(());
+        if let Some(common_highest_checkpoint) = self.network_state.common_highest_checkpoint() {
+            if !self
+                .sync_status
+                .slot_is_subset_of_any_queue(common_highest_checkpoint.slot)
+                && !self
+                    .checkpoints_to_queue
+                    .iter()
+                    .any(|(checkpoint, _)| checkpoint.slot == common_highest_checkpoint.slot)
+            {
+                self.checkpoints_to_queue
+                    .push((common_highest_checkpoint, false));
             }
-        };
-
-        if self
-            .sync_status
-            .slot_is_subset_of_any_queue(common_highest_checkpoint.slot)
-            || self
-                .checkpoints_to_queue
-                .iter()
-                .any(|(checkpoint, _)| checkpoint.slot == common_highest_checkpoint.slot)
-        {
-            return Ok(());
         }
 
-        self.checkpoints_to_queue
-            .push((common_highest_checkpoint, false));
-
+        // Process all queued checkpoints (including those from failed gossip blocks)
         while let Some((checkpoint, bypass_slot_check)) = self.checkpoints_to_queue.pop() {
             let non_queued_peer_id = match self.non_queued_peer_id().await {
                 Some(id) => id,
@@ -573,22 +578,36 @@ impl LeanChainService {
             .slot;
 
         let tolerance = std::cmp::max(8, (lean_network_spec().num_validators * 2) / 3);
-        let highest_peer_head_slot = self
-            .network_state
-            .common_highest_checkpoint()
-            .map(|c| c.slot)
-            .unwrap_or(0);
-        let is_synced_by_time = get_current_slot() <= current_head_slot + tolerance;
-        let is_behind_peers = highest_peer_head_slot > current_head_slot + 2;
+        let common_checkpoint = self.network_state.common_highest_checkpoint();
 
-        let sync_status = if is_behind_peers {
+        if common_checkpoint.is_none() && self.sync_status != SyncStatus::Synced {
+            return Ok(self.sync_status.clone());
+        }
+
+        let highest_peer_head_slot = common_checkpoint.map(|c| c.slot).unwrap_or(0);
+        let is_synced_by_time = get_current_slot() <= current_head_slot + tolerance;
+        let is_behind_peers = highest_peer_head_slot >= current_head_slot + 2;
+
+        // If we have queued checkpoints from failed gossip blocks, we need to sync
+        let has_pending_sync_work = !self.checkpoints_to_queue.is_empty();
+
+        let sync_status = if is_behind_peers || has_pending_sync_work {
             if self.sync_status == SyncStatus::Synced {
-                info!(
-                    slot = get_current_slot(),
-                    head_slot = current_head_slot,
-                    peer_head_slot = highest_peer_head_slot,
-                    "Node fell behind peers; switching to Syncing"
-                );
+                if has_pending_sync_work {
+                    info!(
+                        slot = get_current_slot(),
+                        head_slot = current_head_slot,
+                        pending_checkpoints = self.checkpoints_to_queue.len(),
+                        "Switching to Syncing to process pending checkpoints"
+                    );
+                } else {
+                    info!(
+                        slot = get_current_slot(),
+                        head_slot = current_head_slot,
+                        peer_head_slot = highest_peer_head_slot,
+                        "Node fell behind peers; switching to Syncing"
+                    );
+                }
                 SyncStatus::Syncing { jobs: Vec::new() }
             } else {
                 self.sync_status.clone()
