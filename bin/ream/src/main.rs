@@ -881,10 +881,12 @@ mod tests {
 
     #[test]
     fn test_lean_node_finalizes() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(Verbosity::Info.directive())
-            .with_test_writer()
-            .try_init();
+        if false {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(Verbosity::Info.directive())
+                .with_test_writer()
+                .try_init();
+        }
 
         let cli = Cli::parse_from([
             "ream",
@@ -994,7 +996,7 @@ mod tests {
     }
 
     fn run_multi_node_finalization_test(topology: Vec<Vec<usize>>, test_name: &str) {
-        if true {
+        if false {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(Verbosity::Info.directive())
                 .with_test_writer()
@@ -1183,7 +1185,7 @@ mod tests {
         let topology = [vec![], vec![0], vec![0, 1]];
         let test_name = "late_joiner_sync";
 
-        if true {
+        if false {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(Verbosity::Info.directive())
                 .with_test_writer()
@@ -1451,7 +1453,7 @@ mod tests {
             "REAM_KNOWN_GOOD_BIN path does not exist: {known_good_bin}"
         );
 
-        if true {
+        if false {
             let _ = tracing_subscriber::fmt()
                 .with_env_filter(Verbosity::Info.directive())
                 .with_test_writer()

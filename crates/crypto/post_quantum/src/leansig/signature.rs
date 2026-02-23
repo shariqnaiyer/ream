@@ -81,6 +81,7 @@ mod tests {
     use crate::leansig::{private_key::PrivateKey, signature::Signature};
 
     #[test]
+    #[ignore = "slow: uses generate_key_pair, run in nightly CI"]
     fn test_serialization_roundtrip() {
         let mut rng = rng();
         let activation_epoch = 0;

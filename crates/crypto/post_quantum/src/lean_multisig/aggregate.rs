@@ -87,6 +87,7 @@ mod tests {
     };
 
     #[test]
+    #[ignore = "slow: uses generate_key_pair, run in nightly CI"]
     fn test_aggregate_and_verify() {
         setup_prover();
         setup_verifier();

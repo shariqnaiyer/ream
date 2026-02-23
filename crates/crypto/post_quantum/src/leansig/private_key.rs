@@ -110,6 +110,7 @@ mod tests {
     use crate::leansig::private_key::PrivateKey;
 
     #[test]
+    #[ignore = "slow: uses generate_key_pair, run in nightly CI"]
     fn test_sign_and_verify() {
         let mut rng = rng();
         let activation_epoch = 0;

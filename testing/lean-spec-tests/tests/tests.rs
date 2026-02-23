@@ -4,7 +4,6 @@ use std::{env, fs, path::PathBuf};
 use lean_spec_tests::fork_choice::{load_fork_choice_test, run_fork_choice_test};
 use lean_spec_tests::state_transition::{load_state_transition_test, run_state_transition_test};
 use tracing::{debug, error, info, warn};
-use tracing_subscriber::EnvFilter;
 
 /// Helper to find all JSON files in a directory recursively
 fn find_json_files(dir: &str) -> Vec<PathBuf> {
@@ -37,15 +36,6 @@ fn find_json_files(dir: &str) -> Vec<PathBuf> {
 #[tokio::test]
 #[cfg(feature = "devnet2")]
 async fn test_all_fork_choice_fixtures() {
-    // Initialize tracing subscriber for test output
-    let env_filter = match env::var(EnvFilter::DEFAULT_ENV) {
-        Ok(filter) => EnvFilter::builder().parse_lossy(filter),
-        Err(_) => EnvFilter::new("info"),
-    };
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .try_init();
-
     let fixtures = find_json_files("fixtures/devnet2/fork_choice");
 
     if fixtures.is_empty() {
@@ -98,15 +88,6 @@ async fn test_all_fork_choice_fixtures() {
 
 #[test]
 fn test_all_state_transition_fixtures() {
-    // Initialize tracing subscriber for test output
-    let env_filter = match env::var(EnvFilter::DEFAULT_ENV) {
-        Ok(filter) => EnvFilter::builder().parse_lossy(filter),
-        Err(_) => EnvFilter::new("info"),
-    };
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .try_init();
-
     let fixtures = find_json_files("fixtures/devnet2/state_transition");
 
     if fixtures.is_empty() {
