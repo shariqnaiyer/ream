@@ -1328,7 +1328,7 @@ impl Store {
         let new_payload_keys: Vec<SignatureKey> = new_payloads_provider
             .iter()?
             .into_iter()
-            .map(|(key, _)| key)
+            .map(|(k, _)| k)
             .collect();
 
         let fresh_data_roots: HashSet<B256> = gossip_keys
@@ -1399,7 +1399,7 @@ impl Store {
                 {
                     gossip_signatures.push(signature);
                     if let Some(validator) = head_state.validators.get(validator_id as usize) {
-                        gossip_keys.push(validator.public_key.clone());
+                        gossip_keys.push(validator.public_key);
                     }
                     gossip_ids.push(validator_id);
                 }

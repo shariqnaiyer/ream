@@ -13,12 +13,6 @@ use tree_hash_derive::TreeHash;
 
 use crate::checkpoint::Checkpoint;
 
-// ============================================================================
-// devnet4 only: BytecodePointOption for recursive aggregation
-// ============================================================================
-
-/// Optional bytecode point for recursive aggregation (devnet4 only).
-/// None for non-recursive proofs, Some(bytes) for recursive proofs with children.
 #[cfg(feature = "devnet4")]
 pub type BytecodePointOption = Option<VariableList<u8, U1048576>>;
 
@@ -48,10 +42,6 @@ impl SignatureKey {
     }
 }
 
-// ============================================================================
-// devnet3: AggregatedSignatureProof without bytecode_point
-// ============================================================================
-
 #[cfg(feature = "devnet3")]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
 pub struct AggregatedSignatureProof {
@@ -79,17 +69,11 @@ impl AggregatedSignatureProof {
     }
 }
 
-/// Manual Hash implementation for AggregatedSignatureProof using tree_hash_root
-#[cfg(feature = "devnet3")]
 impl Hash for AggregatedSignatureProof {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.tree_hash_root().hash(state);
     }
 }
-
-// ============================================================================
-// devnet4: AggregatedSignatureProof with bytecode_point for recursive aggregation
-// ============================================================================
 
 #[cfg(feature = "devnet4")]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -162,14 +146,6 @@ impl TreeHash for AggregatedSignatureProof {
         leaves.extend_from_slice(self.proof_data.tree_hash_root().as_slice());
         leaves.extend_from_slice(bytecode_hash.as_slice());
         tree_hash::merkle_root(&leaves, 0)
-    }
-}
-
-/// Manual Hash implementation for AggregatedSignatureProof using tree_hash_root
-#[cfg(feature = "devnet4")]
-impl Hash for AggregatedSignatureProof {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.tree_hash_root().hash(state);
     }
 }
 
