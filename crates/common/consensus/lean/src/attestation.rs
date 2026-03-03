@@ -80,8 +80,6 @@ impl Hash for AggregatedSignatureProof {
 pub struct AggregatedSignatureProof {
     pub participants: BitList<U4096>,
     pub proof_data: VariableList<u8, U1048576>,
-    /// Serialized bytecode-point claim data from recursive aggregation.
-    /// None for non-recursive (direct aggregation), Some(bytes) for recursive.
     pub bytecode_point: BytecodePointOption,
 }
 
