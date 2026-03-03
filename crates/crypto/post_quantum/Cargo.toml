@@ -9,13 +9,20 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+default = ["devnet3"]
+devnet3 = ["dep:lean-multisig"]
+devnet4 = ["dep:lean-multisig-devnet4"]
+
 [dependencies]
 alloy-primitives.workspace = true
 anyhow.workspace = true
 bincode.workspace = true
 ethereum_ssz.workspace = true
 ethereum_ssz_derive.workspace = true
-lean-multisig.workspace = true
+# Use lean-multisig for devnet3 (default), lean-multisig-devnet4 for devnet4
+lean-multisig = { workspace = true, optional = true }
+lean-multisig-devnet4 = { workspace = true, optional = true }
 leansig.workspace = true
 p3-koala-bear = { git = "https://github.com/TomWambsgans/Plonky3.git", branch = "lean-vm-simple" }
 rand.workspace = true

@@ -8,7 +8,7 @@ use anyhow::{anyhow, ensure};
 use ream_consensus_lean::{
     attestation::{
         AggregatedAttestation, AggregatedAttestations, AggregatedSignatureProof, AttestationData,
-        SignatureKey, SignedAggregatedAttestation, SignedAttestation,
+        AttestationSignature, SignatureKey, SignedAggregatedAttestation, SignedAttestation,
     },
     block::{Block, BlockBody, BlockWithSignatures, SignedBlockWithAttestation},
     checkpoint::Checkpoint,
@@ -24,9 +24,29 @@ use ream_metrics::{
 };
 use ream_network_spec::networks::lean_network_spec;
 use ream_network_state_lean::NetworkState;
+#[cfg(feature = "devnet3")]
 use ream_post_quantum_crypto::{
     lean_multisig::aggregate::{aggregate_signatures, verify_aggregate_signature},
     leansig::signature::Signature,
+};
+
+/// Create a blank/default attestation signature for internal processing
+#[cfg(feature = "devnet3")]
+fn blank_attestation_signature() -> AttestationSignature {
+    Signature::blank()
+}
+
+#[cfg(feature = "devnet4")]
+fn blank_attestation_signature() -> AttestationSignature {
+    Vec::new()
+}
+
+#[cfg(feature = "devnet4")]
+use ream_consensus_lean::attestation::BytecodePointOption;
+#[cfg(feature = "devnet4")]
+use ream_post_quantum_crypto::lean_multisig::aggregate::{
+    AggregatedXMSS, RecursiveAggregationResult, aggregate_signatures_devnet4,
+    message_to_field_elements, recursive_aggregate, verify_aggregate_signature_devnet4,
 };
 use ream_storage::{
     db::lean::LeanDB,
@@ -252,7 +272,7 @@ impl Store {
                     Ok(SignedAttestation {
                         validator_id: validator,
                         message: data,
-                        signature: Signature::blank(),
+                        signature: blank_attestation_signature(),
                     })
                 }),
                 latest_justified_root,
@@ -314,7 +334,14 @@ impl Store {
         } else if current_interval == 2 {
             // Interval 2: Only aggregate signatures if aggregator
             if is_aggregator {
-                self.aggregate_committee_signatures().await?;
+                #[cfg(feature = "devnet3")]
+                {
+                    self.aggregate_committee_signatures().await?;
+                }
+                #[cfg(feature = "devnet4")]
+                {
+                    let _ = self.aggregate_committee_signatures_and_payloads().await?;
+                }
             }
         } else if current_interval == 3 {
             // Interval 3: Update safe target
@@ -376,7 +403,7 @@ impl Store {
                     Ok(SignedAttestation {
                         validator_id: validator,
                         message: data,
-                        signature: Signature::blank(),
+                        signature: blank_attestation_signature(),
                     })
                 }),
                 latest_justified_provider.get()?.root,
@@ -471,6 +498,12 @@ impl Store {
         Ok(self.store.lock().await.head_provider().get()?)
     }
 
+    // ========================================================================
+    // devnet3: Simple aggregation without recursive support
+    // ========================================================================
+
+    /// Aggregate signatures from gossip network into proofs (devnet3 version).
+    #[cfg(feature = "devnet3")]
     fn aggregate_gossip_signatures(
         &self,
         head_state: &LeanState,
@@ -542,6 +575,242 @@ impl Store {
 
         let (attestations, proofs): (Vec<_>, Vec<_>) = results.into_iter().unzip();
         Ok((attestations, proofs))
+    }
+
+    // ========================================================================
+    // devnet4: Full recursive aggregation support
+    // ========================================================================
+
+    /// Aggregate signatures from gossip network and children payloads into proofs (devnet4).
+    ///
+    /// This supports recursive aggregation by combining:
+    /// - `gossip_signatures_provider`: Raw XMSS signatures from gossip network
+    /// - `children_payloads`: Already-aggregated proofs from prior rounds (optional)
+    #[cfg(feature = "devnet4")]
+    fn aggregate(
+        &self,
+        head_state: &LeanState,
+        attestations: &[AggregatedAttestations],
+        gossip_signatures_provider: &GossipSignaturesTable,
+        children_payloads: Option<&HashMap<SignatureKey, Vec<AggregatedSignatureProof>>>,
+    ) -> anyhow::Result<(Vec<AggregatedAttestation>, Vec<AggregatedSignatureProof>)> {
+        let mut groups: HashMap<AttestationData, Vec<u64>> = HashMap::new();
+        for attestation in attestations.iter() {
+            groups
+                .entry(attestation.data.clone())
+                .or_default()
+                .push(attestation.validator_id);
+        }
+
+        let mut results = Vec::new();
+
+        for (data, mut validator_ids) in groups {
+            validator_ids.sort();
+            let data_root = data.tree_hash_root();
+            let mut gossip_signatures = Vec::new();
+            let mut gossip_keys = Vec::new();
+            let mut gossip_ids = Vec::new();
+
+            // Collect gossip signatures
+            for &validator_id in &validator_ids {
+                if let Ok(Some(signature)) = gossip_signatures_provider
+                    .get(SignatureKey::from_parts(validator_id, data_root))
+                {
+                    gossip_signatures.push(signature);
+                    if let Some(validator) = head_state.validators.get(validator_id as usize) {
+                        gossip_keys.push(validator.public_key);
+                    }
+                    gossip_ids.push(validator_id);
+                }
+            }
+
+            // Collect children payloads (skip validators already covered by gossip)
+            let gossip_id_set: HashSet<u64> = gossip_ids.iter().copied().collect();
+            let mut children_proofs: HashSet<AggregatedSignatureProof> = HashSet::new();
+
+            if let Some(payloads) = children_payloads {
+                for &validator_id in &validator_ids {
+                    if gossip_id_set.contains(&validator_id) {
+                        continue;
+                    }
+                    let key = SignatureKey::from_parts(validator_id, data_root);
+                    if let Some(proofs) = payloads.get(&key) {
+                        for proof in proofs {
+                            children_proofs.insert(proof.clone());
+                        }
+                    }
+                }
+            }
+
+            // Need either gossip signatures or multiple child proofs to aggregate
+            if gossip_ids.is_empty() && children_proofs.len() < 2 {
+                continue;
+            }
+
+            if !gossip_ids.is_empty() && gossip_signatures.len() != gossip_keys.len() {
+                continue;
+            }
+
+            // Compute merged participants (from gossip + all children)
+            let mut all_indices: HashSet<u64> = gossip_ids.iter().copied().collect();
+            for child in &children_proofs {
+                all_indices.extend(child.to_validator_indices());
+            }
+
+            let max_id = all_indices.iter().max().map_or(0, |&id| id as usize + 1);
+            let mut merged_bits = BitList::<U4096>::with_capacity(max_id)
+                .map_err(|err| anyhow!("BitList error: {err:?}"))?;
+
+            for id in &all_indices {
+                merged_bits
+                    .set(*id as usize, true)
+                    .map_err(|err| anyhow!("BitList error: {err:?}"))?;
+            }
+
+            // Determine if this is recursive aggregation
+            let is_recursive = !children_proofs.is_empty();
+
+            // TODO: Implement full devnet4 aggregation using lean-multisig-devnet4 API
+            // For now, create placeholder proofs. Full implementation requires:
+            // 1. Deserializing gossip_signatures (Vec<u8>) to XmssSignature
+            // 2. Converting gossip_keys (PublicKey) to XmssPublicKey
+            // 3. Calling aggregate_signatures_devnet4 or recursive_aggregate
+            let proof_data = if is_recursive {
+                children_proofs
+                    .iter()
+                    .next()
+                    .map(|p| p.proof_data.to_vec())
+                    .unwrap_or_default()
+            } else {
+                // Concatenate raw signatures as placeholder
+                gossip_signatures.concat()
+            };
+
+            let proof = if is_recursive {
+                AggregatedSignatureProof {
+                    participants: merged_bits.clone(),
+                    proof_data: VariableList::new(proof_data)
+                        .map_err(|err| anyhow!("Failed to create proof_data: {err:?}"))?,
+                    bytecode_point: Some(
+                        VariableList::new(vec![0u8; 1])
+                            .map_err(|err| anyhow!("Failed to create bytecode_point: {err:?}"))?,
+                    ),
+                }
+            } else {
+                AggregatedSignatureProof::new(
+                    merged_bits.clone(),
+                    VariableList::new(proof_data)
+                        .map_err(|err| anyhow!("Failed to create proof_data: {err:?}"))?,
+                )
+            };
+
+            results.push((
+                AggregatedAttestation {
+                    aggregation_bits: merged_bits,
+                    message: data.clone(),
+                },
+                proof,
+            ));
+        }
+
+        if results.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let (attestations, proofs): (Vec<_>, Vec<_>) = results.into_iter().unzip();
+        Ok((attestations, proofs))
+    }
+
+    /// Wrapper for backward compatibility (devnet4)
+    #[cfg(feature = "devnet4")]
+    fn aggregate_gossip_signatures(
+        &self,
+        head_state: &LeanState,
+        attestations: &[AggregatedAttestations],
+        gossip_signatures_provider: &GossipSignaturesTable,
+    ) -> anyhow::Result<(Vec<AggregatedAttestation>, Vec<AggregatedSignatureProof>)> {
+        self.aggregate(head_state, attestations, gossip_signatures_provider, None)
+    }
+
+    /// Merge new and known aggregated payloads into a single view (devnet4 only).
+    #[cfg(feature = "devnet4")]
+    async fn merged_aggregated_payloads(
+        &self,
+    ) -> anyhow::Result<HashMap<SignatureKey, Vec<AggregatedSignatureProof>>> {
+        let (latest_new_provider, latest_known_provider) = {
+            let db = self.store.lock().await;
+            (
+                db.latest_new_aggregated_payloads_provider(),
+                db.latest_known_aggregated_payloads_provider(),
+            )
+        };
+
+        let mut merged: HashMap<SignatureKey, Vec<AggregatedSignatureProof>> = HashMap::new();
+
+        for (key, proofs) in latest_known_provider.iter()? {
+            merged.insert(key, proofs);
+        }
+
+        for (key, new_proofs) in latest_new_provider.iter()? {
+            merged.entry(key).or_default().extend(new_proofs);
+        }
+
+        Ok(merged)
+    }
+
+    /// Build attestation list from gossip and aggregated payloads (devnet4 only).
+    #[cfg(feature = "devnet4")]
+    async fn attestations_from_gossip_and_payloads(
+        &self,
+    ) -> anyhow::Result<Vec<AggregatedAttestations>> {
+        let (
+            gossip_signatures_provider,
+            latest_new_provider,
+            latest_known_provider,
+            attestation_data_by_root_provider,
+        ) = {
+            let db = self.store.lock().await;
+            (
+                db.gossip_signatures_provider(),
+                db.latest_new_aggregated_payloads_provider(),
+                db.latest_known_aggregated_payloads_provider(),
+                db.attestation_data_by_root_provider(),
+            )
+        };
+
+        let mut fresh_data_roots: HashSet<B256> = HashSet::new();
+        for key in gossip_signatures_provider.get_keys()? {
+            fresh_data_roots.insert(key.data_root);
+        }
+        for (key, _) in latest_new_provider.iter()? {
+            fresh_data_roots.insert(key.data_root);
+        }
+
+        let mut all_keys: HashSet<SignatureKey> = HashSet::new();
+
+        for key in gossip_signatures_provider.get_keys()? {
+            all_keys.insert(key);
+        }
+        for (key, _) in latest_new_provider.iter()? {
+            all_keys.insert(key);
+        }
+        for (key, _) in latest_known_provider.iter()? {
+            if fresh_data_roots.contains(&key.data_root) {
+                all_keys.insert(key);
+            }
+        }
+
+        let mut attestation_list = Vec::new();
+        for sig_key in all_keys {
+            if let Some(data) = attestation_data_by_root_provider.get(sig_key.data_root)? {
+                attestation_list.push(AggregatedAttestations {
+                    validator_id: sig_key.validator_id,
+                    data: data.clone(),
+                });
+            }
+        }
+
+        Ok(attestation_list)
     }
 
     async fn select_aggregated_proofs(
@@ -996,7 +1265,10 @@ impl Store {
                     proposer_attestation.validator_id,
                     &proposer_attestation.data,
                 ),
-                signed_block_with_attestation.signature.proposer_signature,
+                signed_block_with_attestation
+                    .signature
+                    .proposer_signature
+                    .clone(),
             )?;
         }
 
@@ -1018,7 +1290,10 @@ impl Store {
                         self.store.lock().await.gossip_signatures_provider();
                     gossip_signatures_provider.insert(
                         SignatureKey::new(proposer_validator_id, &proposer_attestation.data),
-                        signed_block_with_attestation.signature.proposer_signature,
+                        signed_block_with_attestation
+                            .signature
+                            .proposer_signature
+                            .clone(),
                     )?;
                 }
             }
@@ -1137,24 +1412,35 @@ impl Store {
                 .get(data.target.root)?
                 .ok_or_else(|| anyhow!("No state available for target {}", data.target.root))?;
 
-            let public_keys: Vec<_> = validator_ids
-                .iter()
-                .map(|&validator| {
-                    state
-                        .validators
-                        .get(validator as usize)
-                        .map(|validator| validator.public_key)
-                        .ok_or_else(|| anyhow!("Validator {validator} not found in state"))
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
+            #[cfg(feature = "devnet3")]
+            {
+                let public_keys: Vec<_> = validator_ids
+                    .iter()
+                    .map(|&validator| {
+                        state
+                            .validators
+                            .get(validator as usize)
+                            .map(|validator| validator.public_key.clone())
+                            .ok_or_else(|| anyhow!("Validator {validator} not found in state"))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
 
-            verify_aggregate_signature(
-                &public_keys,
-                &data_root.0,
-                proof.proof_data.as_ref(),
-                attestation_slot as u32,
-            )
-            .map_err(|err| anyhow!("Aggregated signature verification failed: {err}"))?;
+                verify_aggregate_signature(
+                    &public_keys,
+                    &data_root.0,
+                    proof.proof_data.as_ref(),
+                    attestation_slot as u32,
+                )
+                .map_err(|err| anyhow!("Aggregated signature verification failed: {err}"))?;
+            }
+
+            #[cfg(feature = "devnet4")]
+            {
+                // TODO: Implement devnet4 verification using verify_aggregate_signature_devnet4
+                // This requires deserializing proof.proof_data to AggregatedXMSS and
+                // converting the message to field elements
+                let _ = (&validator_ids, attestation_slot);
+            }
 
             attestation_data_by_root_provider.insert(data_root, data.clone())?;
 
@@ -1211,6 +1497,86 @@ impl Store {
         Ok(attestations)
     }
 
+    /// Aggregate committee signatures for attestations in committee_signatures
+    /// and aggregated payloads from latest_new_aggregated_payloads and
+    /// latest_known_aggregated_payloads.
+    ///
+    /// Aggregates from gossip_signatures and from existing aggregated payloads
+    /// (latest_new and latest_known). Attestations are reconstructed from
+    /// attestation_data_by_root so that recursive aggregation can coalesce
+    /// gossip signatures and children payloads into a single proof per group.
+    #[cfg(feature = "devnet4")]
+    pub async fn aggregate_committee_signatures_and_payloads(
+        &mut self,
+    ) -> anyhow::Result<Vec<SignedAggregatedAttestation>> {
+        let (
+            state_provider,
+            gossip_signatures_provider,
+            head_root,
+            latest_new_aggregated_payloads_provider,
+        ) = {
+            let db = self.store.lock().await;
+            (
+                db.state_provider(),
+                db.gossip_signatures_provider(),
+                db.head_provider().get()?,
+                db.latest_new_aggregated_payloads_provider(),
+            )
+        };
+
+        let head_state = state_provider
+            .get(head_root)?
+            .ok_or_else(|| anyhow!("Head state not found"))?;
+
+        // Build attestation list from all sources (gossip + payloads)
+        let attestation_list = self.attestations_from_gossip_and_payloads().await?;
+
+        // Get merged aggregated payloads for recursive aggregation
+        let merged_payloads = self.merged_aggregated_payloads().await?;
+
+        // Collect keys to remove from gossip after aggregation
+        let aggregated_keys: Vec<SignatureKey> = gossip_signatures_provider.get_keys()?;
+
+        // Perform aggregation with recursive support
+        let (aggregated_results, proofs) = self.aggregate(
+            &head_state,
+            &attestation_list,
+            &gossip_signatures_provider,
+            Some(&merged_payloads),
+        )?;
+
+        // Store aggregated proofs
+        let mut signed_attestations = Vec::new();
+        for (aggregated_attestation, aggregated_signature) in
+            aggregated_results.into_iter().zip(proofs)
+        {
+            let data_root = aggregated_attestation.message.tree_hash_root();
+            for validator in aggregated_signature.to_validator_indices() {
+                let key = SignatureKey::from_parts(validator, data_root);
+                let mut proofs = latest_new_aggregated_payloads_provider
+                    .get(key.clone())?
+                    .unwrap_or_default();
+
+                proofs.push(aggregated_signature.clone());
+                latest_new_aggregated_payloads_provider.insert(key, proofs)?;
+            }
+
+            signed_attestations.push(SignedAggregatedAttestation {
+                data: aggregated_attestation.message,
+                proof: aggregated_signature,
+            });
+        }
+
+        // Clear processed gossip signatures
+        for signature_key in aggregated_keys {
+            let _ = gossip_signatures_provider.remove(signature_key);
+        }
+
+        Ok(signed_attestations)
+    }
+
+    /// Legacy function for backward compatibility - aggregates only gossip signatures
+    #[cfg(feature = "devnet3")]
     pub async fn aggregate_committee_signatures(&mut self) -> anyhow::Result<()> {
         let (
             state_provider,
@@ -1286,7 +1652,7 @@ impl Store {
     ) -> anyhow::Result<()> {
         let validator_id = signed_attestation.validator_id;
         let attestation_data = &signed_attestation.message;
-        let signature = signed_attestation.signature;
+        let signature = signed_attestation.signature.clone();
         let (attestation_data_by_root_provider, validator_id_provider) = {
             let db = self.store.lock().await;
             (
@@ -1310,6 +1676,7 @@ impl Store {
             "Validator {validator_id} not found in state",
         );
 
+        #[cfg(feature = "devnet3")]
         ensure!(
             signature.verify(
                 &key_state.validators[validator_id as usize].public_key,
@@ -1318,6 +1685,14 @@ impl Store {
             )?,
             "Signature verification failed"
         );
+
+        #[cfg(feature = "devnet4")]
+        {
+            // TODO: Implement devnet4 XMSS signature verification
+            // This requires deserializing the signature Vec<u8> to XmssSignature and
+            // using the appropriate verification function
+            let _ = &key_state.validators[validator_id as usize].public_key;
+        }
 
         let data_root = attestation_data.tree_hash_root();
 
@@ -1427,11 +1802,12 @@ mod tests {
     };
     use ream_consensus_misc::constants::lean::INTERVALS_PER_SLOT;
     use ream_network_spec::networks::{LeanNetworkSpec, lean_network_spec, set_lean_network_spec};
-    use ream_post_quantum_crypto::leansig::signature::Signature;
     use ream_storage::tables::{field::REDBField, table::REDBTable};
     use ream_test_utils::store::sample_store;
     use ssz_types::{BitList, typenum::U4096};
     use tree_hash::TreeHash;
+
+    use crate::store::blank_attestation_signature;
 
     #[tokio::test]
     #[ignore]
@@ -1447,7 +1823,7 @@ mod tests {
 
         let attestation = SignedAttestation {
             validator_id: 0,
-            signature: Signature::blank(),
+            signature: blank_attestation_signature(),
             message: AttestationData {
                 slot: slot_1,
                 head: Checkpoint {
@@ -1488,7 +1864,7 @@ mod tests {
 
         let attestation = SignedAttestation {
             validator_id: 0,
-            signature: Signature::blank(),
+            signature: blank_attestation_signature(),
             message: AttestationData {
                 slot: 2,
                 head: Checkpoint {
@@ -1532,7 +1908,7 @@ mod tests {
 
         let attestation = SignedAttestation {
             validator_id: 0,
-            signature: Signature::blank(),
+            signature: blank_attestation_signature(),
             message: AttestationData {
                 slot: 2,
                 head: Checkpoint {
@@ -1572,7 +1948,7 @@ mod tests {
 
         let attestation = SignedAttestation {
             validator_id: 0,
-            signature: Signature::blank(),
+            signature: blank_attestation_signature(),
             message: AttestationData {
                 slot: slot_1,
                 head: Checkpoint {
@@ -1601,7 +1977,7 @@ mod tests {
 
         let attestation = SignedAttestation {
             validator_id: 0,
-            signature: Signature::blank(),
+            signature: blank_attestation_signature(),
             message: AttestationData {
                 slot: 0,
                 head: genesis_checkpoint,
@@ -1654,7 +2030,7 @@ mod tests {
                 })
                 .unwrap();
             db.gossip_signatures_provider()
-                .insert(sig_key.clone(), Signature::blank())
+                .insert(sig_key.clone(), blank_attestation_signature())
                 .unwrap();
         }
 
@@ -1701,7 +2077,7 @@ mod tests {
                 })
                 .unwrap();
             db.gossip_signatures_provider()
-                .insert(sig_key.clone(), Signature::blank())
+                .insert(sig_key.clone(), blank_attestation_signature())
                 .unwrap();
         }
 
@@ -1738,7 +2114,7 @@ mod tests {
                 })
                 .unwrap();
             db.gossip_signatures_provider()
-                .insert(sig_key.clone(), Signature::blank())
+                .insert(sig_key.clone(), blank_attestation_signature())
                 .unwrap();
         }
 
@@ -1809,10 +2185,10 @@ mod tests {
                 })
                 .unwrap();
             db.gossip_signatures_provider()
-                .insert(stale_key.clone(), Signature::blank())
+                .insert(stale_key.clone(), blank_attestation_signature())
                 .unwrap();
             db.gossip_signatures_provider()
-                .insert(fresh_key.clone(), Signature::blank())
+                .insert(fresh_key.clone(), blank_attestation_signature())
                 .unwrap();
         }
 
@@ -1914,10 +2290,10 @@ mod tests {
 
             let gossip = db.gossip_signatures_provider();
             gossip
-                .insert(sig_key_1.clone(), Signature::blank())
+                .insert(sig_key_1.clone(), blank_attestation_signature())
                 .unwrap();
             gossip
-                .insert(sig_key_2.clone(), Signature::blank())
+                .insert(sig_key_2.clone(), blank_attestation_signature())
                 .unwrap();
         }
 
@@ -1962,7 +2338,7 @@ mod tests {
                 let key = SignatureKey::new(i, &data);
 
                 db.attestation_data_by_root_provider().insert(root, data)?;
-                gossip.insert(key, Signature::blank()).unwrap();
+                gossip.insert(key, blank_attestation_signature()).unwrap();
                 roots.push(root);
             }
         }
@@ -2473,7 +2849,7 @@ mod tests {
                     source: justified_checkpoint,
                 },
                 validator_id: 5,
-                signature: Signature::blank(),
+                signature: blank_attestation_signature(),
             };
             let db_table = db.latest_new_attestations_provider();
             db_table
@@ -2580,7 +2956,7 @@ mod tests {
                     source: justified_checkpoint,
                 },
                 validator_id: 5,
-                signature: Signature::blank(),
+                signature: blank_attestation_signature(),
             };
             let db_table = db.latest_new_attestations_provider();
             db_table
@@ -2699,7 +3075,7 @@ mod tests {
                     source: justified_checkpoint,
                 },
                 validator_id: i,
-                signature: Signature::blank(),
+                signature: blank_attestation_signature(),
             };
             let db_table = db.latest_new_attestations_provider();
 
@@ -2904,7 +3280,7 @@ mod tests {
                     source: justified_checkpoint,
                 },
                 validator_id: 10,
-                signature: Signature::blank(),
+                signature: blank_attestation_signature(),
             };
             let db_table = db.latest_new_attestations_provider();
             db_table

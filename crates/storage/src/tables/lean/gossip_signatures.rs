@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use ream_consensus_lean::attestation::SignatureKey;
-use ream_post_quantum_crypto::leansig::signature::Signature;
 use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::{
@@ -9,21 +8,35 @@ use crate::{
     tables::{ssz_encoder::SSZEncoding, table::REDBTable},
 };
 
+// Type alias for signature storage - leansig Signature for devnet3, Vec<u8> for devnet4
+#[cfg(feature = "devnet3")]
+pub type GossipSignature = ream_post_quantum_crypto::leansig::signature::Signature;
+
+#[cfg(feature = "devnet4")]
+pub type GossipSignature = Vec<u8>;
+
+// Fallback for when neither feature is enabled (shouldn't happen in practice)
+#[cfg(not(any(feature = "devnet3", feature = "devnet4")))]
+pub type GossipSignature = Vec<u8>;
+
 /// Table for storing per-validator XMSS signatures learned from gossip.
 /// Key: SignatureKey (validator_id, attestation_data_root)
-/// Value: Signature
+/// Value: GossipSignature (leansig Signature for devnet3, Vec<u8> for devnet4)
 pub struct GossipSignaturesTable {
     pub db: Arc<Database>,
 }
 
 impl REDBTable for GossipSignaturesTable {
-    const TABLE_DEFINITION: TableDefinition<'_, SSZEncoding<SignatureKey>, SSZEncoding<Signature>> =
-        TableDefinition::new("gossip_signatures");
+    const TABLE_DEFINITION: TableDefinition<
+        '_,
+        SSZEncoding<SignatureKey>,
+        SSZEncoding<GossipSignature>,
+    > = TableDefinition::new("gossip_signatures");
 
     type Key = SignatureKey;
     type KeyTableDefinition = SSZEncoding<SignatureKey>;
-    type Value = Signature;
-    type ValueTableDefinition = SSZEncoding<Signature>;
+    type Value = GossipSignature;
+    type ValueTableDefinition = SSZEncoding<GossipSignature>;
 
     fn database(&self) -> Arc<Database> {
         self.db.clone()

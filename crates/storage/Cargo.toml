@@ -11,7 +11,8 @@ version.workspace = true
 
 [features]
 default = []
-devnet3 = ["ream-consensus-lean/devnet3"]
+devnet3 = ["ream-consensus-lean/devnet3", "ream-post-quantum-crypto/devnet3"]
+devnet4 = ["ream-consensus-lean/devnet4", "ream-post-quantum-crypto/devnet4"]
 
 [dependencies]
 alloy-primitives.workspace = true

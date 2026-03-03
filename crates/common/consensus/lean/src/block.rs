@@ -1,8 +1,11 @@
 use alloy_primitives::B256;
 use anyhow::{anyhow, ensure};
 use ream_metrics::{PQ_SIGNATURE_ATTESTATION_VERIFICATION_TIME, start_timer, stop_timer};
-use ream_post_quantum_crypto::{
-    lean_multisig::aggregate::verify_aggregate_signature, leansig::signature::Signature,
+#[cfg(feature = "devnet3")]
+use ream_post_quantum_crypto::lean_multisig::aggregate::verify_aggregate_signature;
+#[cfg(feature = "devnet4")]
+use ream_post_quantum_crypto::lean_multisig::aggregate::{
+    XmssSignature, message_to_field_elements, verify_aggregate_signature_devnet4,
 };
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
@@ -15,10 +18,19 @@ use crate::{
     state::LeanState,
 };
 
+#[cfg(feature = "devnet3")]
+pub type ProposerSignature = ream_post_quantum_crypto::leansig::signature::Signature;
+
+#[cfg(feature = "devnet4")]
+pub type ProposerSignature = XmssSignature;
+
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct BlockSignatures {
     pub attestation_signatures: VariableList<AggregatedSignatureProof, U4096>,
-    pub proposer_signature: Signature,
+    #[cfg(feature = "devnet3")]
+    pub proposer_signature: ream_post_quantum_crypto::leansig::signature::Signature,
+    #[cfg(feature = "devnet4")]
+    pub proposer_signature: Vec<u8>, // Serialized XmssSignature for devnet4
 }
 
 /// Envelope carrying a block, an attestation from proposer, and aggregated signatures.
@@ -29,6 +41,7 @@ pub struct SignedBlockWithAttestation {
 }
 
 impl SignedBlockWithAttestation {
+    #[cfg(feature = "devnet3")]
     pub fn verify_signatures(
         &self,
         parent_state: &LeanState,
@@ -119,6 +132,76 @@ impl SignedBlockWithAttestation {
                 "Proposer signature verification failed"
             );
         }
+
+        Ok(true)
+    }
+
+    #[cfg(feature = "devnet4")]
+    pub fn verify_signatures(
+        &self,
+        parent_state: &LeanState,
+        verify_signatures: bool,
+    ) -> anyhow::Result<bool> {
+        let block = &self.message.block;
+        let signatures = &self.signature;
+        let aggregated_attestations = &block.body.attestations;
+        let attestation_signatures = &signatures.attestation_signatures;
+
+        ensure!(
+            attestation_signatures.len() == aggregated_attestations.len(),
+            "Number of signatures {} does not match number of attestations {}",
+            attestation_signatures.len(),
+            aggregated_attestations.len(),
+        );
+
+        let validators = &parent_state.validators;
+
+        for (aggregated_attestation, aggregated_signature) in aggregated_attestations
+            .iter()
+            .zip(attestation_signatures.iter())
+        {
+            let validator_ids: Vec<usize> = aggregated_attestation
+                .aggregation_bits
+                .iter()
+                .enumerate()
+                .filter(|(_, bit)| *bit)
+                .map(|(index, _)| index)
+                .collect();
+
+            let attestation_root = aggregated_attestation.message.tree_hash_root();
+
+            // Validate all validator indices are in range
+            for &validator_id in &validator_ids {
+                ensure!(
+                    validator_id < validators.len(),
+                    "Validator index out of range"
+                );
+            }
+
+            if verify_signatures {
+                let timer = start_timer(&PQ_SIGNATURE_ATTESTATION_VERIFICATION_TIME, &[]);
+
+                // For devnet4, deserialize and verify the aggregated proof
+                let aggregated = ream_post_quantum_crypto::lean_multisig::aggregate::AggregatedXMSS::deserialize(
+                    aggregated_signature.proof_data.as_ref()
+                ).ok_or_else(|| anyhow!("Failed to deserialize aggregated signature"))?;
+
+                let message_fe = message_to_field_elements(&attestation_root);
+
+                verify_aggregate_signature_devnet4(
+                    &aggregated,
+                    &message_fe,
+                    aggregated_attestation.message.slot as u32,
+                )
+                .map_err(|err| {
+                    anyhow!("Attestation aggregated signature verification failed: {err}")
+                })?;
+                stop_timer(timer);
+            }
+        }
+
+        // TODO: Proposer signature verification for devnet4
+        // The proposer signature needs to be verified using devnet4 XMSS API
 
         Ok(true)
     }
