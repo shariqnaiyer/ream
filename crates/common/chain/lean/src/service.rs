@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use alloy_primitives::B256;
 use anyhow::anyhow;
 use futures::stream::{FuturesUnordered, StreamExt};
 use libp2p_identity::PeerId;
@@ -1336,7 +1337,7 @@ impl LeanChainService {
         let parent_root_is_start_of_any_queue =
             self.sync_status.is_root_start_of_any_queue(&parent_root);
 
-        let parent_root_is_genesis = parent_root == alloy_primitives::B256::ZERO;
+        let parent_root_is_genesis = parent_root == B256::ZERO;
 
         if parent_root_is_local_head
             || parent_root_in_pending_blocks
