@@ -34,6 +34,7 @@ devnet4 = [
     "ream-keystore/devnet4",
     "ream-network-spec/devnet4",
     "ream-p2p/devnet4",
+    "ream-post-quantum-crypto/devnet4",
     "ream-rpc-lean/devnet4",
     "ream-storage/devnet4",
     "ream-validator-lean/devnet4",
