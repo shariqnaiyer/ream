@@ -1609,8 +1609,7 @@ mod tests {
             .canonicalize()
             .expect("Failed to canonicalize assets path");
 
-        let registry_path =
-            write_test_validator_registry(&assets_directory, test_name, node_count);
+        let registry_path = write_test_validator_registry(&assets_directory, test_name, node_count);
         let registry_path_string = registry_path.to_string_lossy().to_string();
 
         let network_config_path = create_test_network_config(test_name, 3);
@@ -1813,8 +1812,7 @@ mod tests {
             .canonicalize()
             .expect("Failed to canonicalize assets path");
 
-        let registry_path =
-            write_test_validator_registry(&assets_directory, test_name, node_count);
+        let registry_path = write_test_validator_registry(&assets_directory, test_name, node_count);
         let registry_path_string = registry_path.to_string_lossy().to_string();
 
         let network_config_path = create_test_network_config(test_name, 3);
@@ -2152,8 +2150,7 @@ mod tests {
             .canonicalize()
             .expect("Failed to canonicalize assets path");
 
-        let registry_path =
-            write_test_validator_registry(&assets_directory, test_name, node_count);
+        let registry_path = write_test_validator_registry(&assets_directory, test_name, node_count);
         let registry_path_string = registry_path.to_string_lossy().to_string();
 
         let network_config_path = create_test_network_config(test_name, 2);
