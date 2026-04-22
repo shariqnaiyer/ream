@@ -12,8 +12,6 @@ use crate::leansig::{LeanSigScheme, errors::LeanSigError, public_key::PublicKey}
 const SIGNATURE_SIZE: usize = 3112;
 #[cfg(feature = "devnet4")]
 const SIGNATURE_SIZE: usize = 2536;
-#[cfg(not(any(feature = "devnet3", feature = "devnet4")))]
-const SIGNATURE_SIZE: usize = 3112;
 
 type LeanSigSignature = <LeanSigScheme as SignatureScheme>::Signature;
 
