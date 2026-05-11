@@ -323,13 +323,15 @@ impl Store {
         &mut self,
         has_proposal: bool,
         is_aggregator: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<SignedAggregatedAttestation>> {
         let current_interval = {
             let time_provider = self.store.lock().await.time_provider();
             let time = time_provider.get()? + 1;
             time_provider.insert(time)?;
             time % INTERVALS_PER_SLOT
         };
+
+        let mut new_aggregates = Vec::new();
 
         if current_interval == 0 {
             if has_proposal {
@@ -338,7 +340,7 @@ impl Store {
         } else if current_interval == 2 {
             // Interval 2: Only aggregate signatures if aggregator
             if is_aggregator {
-                self.aggregate().await?;
+                new_aggregates = self.aggregate().await?;
             }
         } else if current_interval == 3 {
             // Interval 3: Update safe target
@@ -348,7 +350,7 @@ impl Store {
             self.accept_new_attestations().await?;
         }
 
-        Ok(())
+        Ok(new_aggregates)
     }
 
     pub async fn on_tick(
@@ -356,24 +358,27 @@ impl Store {
         time: u64,
         has_proposal: bool,
         is_aggregator: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<SignedAggregatedAttestation>> {
         let genesis_time = self.genesis_time().await?;
         let Some(seconds_since_genesis) = time.checked_sub(genesis_time) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let time_delta_ms = seconds_since_genesis * 1000;
         let tick_interval_time =
             time_delta_ms * INTERVALS_PER_SLOT / (lean_network_spec().seconds_per_slot * 1000);
 
         let time_provider = self.store.lock().await.time_provider();
+        let mut all_new_aggregates = Vec::new();
         while time_provider.get()? < tick_interval_time {
             let should_signal_proposal =
                 has_proposal && (time_provider.get()? + 1) == tick_interval_time;
 
-            self.tick_interval(should_signal_proposal, is_aggregator)
+            let new_aggregates = self
+                .tick_interval(should_signal_proposal, is_aggregator)
                 .await?;
+            all_new_aggregates.extend(new_aggregates);
         }
-        Ok(())
+        Ok(all_new_aggregates)
     }
 
     /// Done upon processing new attestations or a new block
@@ -488,7 +493,9 @@ impl Store {
     pub async fn get_proposal_head(&mut self, slot: u64) -> anyhow::Result<B256> {
         let slot_duration_seconds = slot * lean_network_spec().seconds_per_slot;
         let slot_time = lean_network_spec().genesis_time + slot_duration_seconds;
-        self.on_tick(slot_time, true, false).await?;
+        // is_aggregator=false here — aggregator publishing happens in the
+        // chain service loop, not during block-proposal head selection.
+        let _ = self.on_tick(slot_time, true, false).await?;
         self.accept_new_attestations().await?;
         Ok(self.store.lock().await.head_provider().get()?)
     }

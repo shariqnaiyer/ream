@@ -316,7 +316,12 @@ impl LeanChainService {
                         self.sync_status = self.update_sync_status().await?;
                     }
                     if self.sync_status == SyncStatus::Synced {
-                        self.store.write().await.tick_interval(tick_count.is_multiple_of(INTERVALS_PER_SLOT), self.is_aggregator).await.expect("Failed to tick interval");
+                        let new_aggregates = self.store.write().await.tick_interval(tick_count.is_multiple_of(INTERVALS_PER_SLOT), self.is_aggregator).await.expect("Failed to tick interval");
+                        for aggregated_attestation in new_aggregates {
+                            if let Err(err) = self.outbound_p2p.send(LeanP2PRequest::GossipAggregatedAttestation(Box::new(aggregated_attestation))) {
+                                warn!("Failed to publish locally produced aggregated attestation: {err:?}");
+                            }
+                        }
                         self.step_head_sync(tick_count).await?;
                     }
 
@@ -1151,7 +1156,10 @@ impl LeanChainService {
                 .duration_since(UNIX_EPOCH)
                 .map_err(|err| anyhow!("System time before unix epoch: {err:?}"))?
                 .as_secs();
-            self.store.write().await.on_tick(now, false, true).await?;
+            // Discard aggregates produced during sync catch-up — they reference
+            // historical state and would be rejected by peers as too old. Live
+            // aggregation publishing happens in the main tick loop.
+            let _ = self.store.write().await.on_tick(now, false, true).await?;
         } else if sync_status != SyncStatus::Synced {
             self.telemetry.synced_peer_gap_started_at = None;
         }

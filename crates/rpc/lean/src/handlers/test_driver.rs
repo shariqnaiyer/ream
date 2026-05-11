@@ -437,6 +437,7 @@ async fn advance_to_interval(
                 is_aggregator,
             )
             .await?;
+        // Aggregates produced during fixture-driven ticks are not published.
     }
 }
 
@@ -456,7 +457,10 @@ async fn advance_to_block_slot(
             .genesis_time
     };
     let slot_time = genesis_time + block.slot * lean_network_spec().seconds_per_slot;
-    store.on_tick(slot_time, has_proposal, is_aggregator).await
+    store
+        .on_tick(slot_time, has_proposal, is_aggregator)
+        .await
+        .map(|_| ())
 }
 
 async fn apply_fork_choice_step(store: &mut Store, step: ForkChoiceStep) -> anyhow::Result<()> {
@@ -471,6 +475,7 @@ async fn apply_fork_choice_step(store: &mut Store, step: ForkChoiceStep) -> anyh
                 store
                     .on_tick(tick_time, has_proposal.unwrap_or(false), true)
                     .await
+                    .map(|_| ())
             }
             (None, Some(target_interval)) => {
                 advance_to_interval(store, target_interval, has_proposal.unwrap_or(false), true)
