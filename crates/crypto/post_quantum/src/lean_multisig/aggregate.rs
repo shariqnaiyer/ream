@@ -8,6 +8,14 @@ use crate::leansig::{public_key::PublicKey, signature::Signature};
 /// Default log inverse rate for WHIR (1/4 rate).
 const DEFAULT_LOG_INV_RATE: usize = 2;
 
+/// Minimum number of unique signers the rec_aggregation ZK circuit can handle.
+///
+/// The `log2_ceil_runtime` function inside the circuit enforces `log2_ceil(n) >= 2`,
+/// which means the total number of unique participants `n` must be at least 3.
+/// Passing fewer signers causes `execute_bytecode` to panic with
+/// `Error during bytecode execution: NotEqual(0, 1)`.
+pub const MIN_AGGREGATE_SIGNERS: usize = 3;
+
 /// Setup function for the prover side of XMSS aggregation.
 pub fn aggregation_setup_prover() {
     setup_prover();
@@ -21,12 +29,24 @@ pub fn aggregation_setup_verifier() {
 /// Aggregate raw XMSS signatures into a single proof.
 ///
 /// Returns serialized `AggregatedXMSS` proof bytes.
+///
+/// # Errors
+///
+/// Returns an error if `public_keys.len() < MIN_AGGREGATE_SIGNERS`. The underlying
+/// ZK circuit panics for smaller inputs; this guard surfaces a proper error instead.
 pub fn aggregate_signatures(
     public_keys: &[PublicKey],
     signatures: &[Signature],
     message: &[u8; 32],
     slot: u32,
 ) -> anyhow::Result<Vec<u8>> {
+    if public_keys.len() < MIN_AGGREGATE_SIGNERS {
+        return Err(anyhow!(
+            "Cannot aggregate {} signer(s): rec_aggregation ZK circuit requires at least \
+             {MIN_AGGREGATE_SIGNERS} (log2_ceil constraint)",
+            public_keys.len()
+        ));
+    }
     aggregate_signatures_recursive(&[], public_keys, signatures, message, slot)
 }
 
@@ -40,6 +60,12 @@ pub struct ChildProof {
 /// Aggregate raw XMSS signatures with recursive child proofs.
 ///
 /// Returns serialized `AggregatedXMSS` proof bytes (includes bytecode_point for recursion).
+///
+/// # Errors
+///
+/// Returns an error if the total number of participants across `children` and `public_keys`
+/// is less than [`MIN_AGGREGATE_SIGNERS`]. The ZK circuit enforces a minimum participant
+/// count; this guard converts what would otherwise be a panic into a proper error.
 pub fn aggregate_signatures_recursive(
     children: &[ChildProof],
     public_keys: &[PublicKey],
@@ -52,6 +78,19 @@ pub fn aggregate_signatures_recursive(
             "Public key count ({}) does not match signature count ({})",
             public_keys.len(),
             signatures.len()
+        ));
+    }
+
+    // Count total participants (overestimate before dedup, but safe as a lower-bound check).
+    let total_signers = public_keys.len()
+        + children
+            .iter()
+            .map(|c| c.public_keys.len())
+            .sum::<usize>();
+    if total_signers < MIN_AGGREGATE_SIGNERS {
+        return Err(anyhow!(
+            "Cannot aggregate {total_signers} total participant(s): rec_aggregation ZK circuit \
+             requires at least {MIN_AGGREGATE_SIGNERS} (log2_ceil constraint)"
         ));
     }
 

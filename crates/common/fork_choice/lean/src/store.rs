@@ -40,7 +40,7 @@ use ream_network_spec::networks::lean_network_spec;
 use ream_network_state_lean::NetworkState;
 use ream_post_quantum_crypto::{
     lean_multisig::aggregate::{
-        ChildProof, aggregate_signatures, aggregate_signatures_recursive,
+        ChildProof, MIN_AGGREGATE_SIGNERS, aggregate_signatures, aggregate_signatures_recursive,
         verify_aggregate_signature,
     },
     leansig::signature::Signature,
@@ -52,6 +52,7 @@ use ream_storage::{
 use ream_sync::rwlock::{Reader, Writer};
 use ssz_types::{BitList, VariableList, typenum::U4096};
 use tokio::sync::Mutex;
+use tracing::debug;
 use tree_hash::TreeHash;
 
 use crate::constants::JUSTIFICATION_LOOKBACK_SLOTS;
@@ -598,6 +599,21 @@ impl Store {
                 continue;
             }
 
+            let participant_count = if recursive {
+                covered_validators.len()
+            } else {
+                raw_entries.len()
+            };
+            if participant_count < MIN_AGGREGATE_SIGNERS {
+                debug!(
+                    slot = data.slot,
+                    participant_count,
+                    MIN_AGGREGATE_SIGNERS,
+                    "Skipping aggregation: too few participants"
+                );
+                continue;
+            }
+
             raw_entries.sort_by_key(|err| err.0);
 
             let mut bits = BitList::<U4096>::with_capacity(head_state.validators.len())
@@ -619,14 +635,52 @@ impl Store {
             let xmss_signatures: Vec<_> = raw_entries.iter().map(|err| err.2).collect();
 
             let building_timer = start_timer(&PQ_SIG_AGGREGATED_SIGNATURES_BUILDING_TIME, &[]);
-            let aggregated_signature_bytes =
-                aggregate_signatures(&xmss_keys, &xmss_signatures, &data_root.0, data.slot as u32);
+            let aggregated_signature_bytes = if recursive && !child_proofs.is_empty() {
+                // Convert accumulated child proofs to ChildProof structs (same pattern as
+                // compact_aggregated_proofs) so we can pass them to aggregate_signatures_recursive.
+                // This is the equivalent of ethlambda's aggregate_mixed: prior-round proofs become
+                // ZK children, new raw signatures are appended on top.
+                let children = child_proofs
+                    .iter()
+                    .map(|proof| {
+                        let public_keys = proof
+                            .to_validator_indices()
+                            .into_iter()
+                            .map(|validator_index| {
+                                head_state
+                                    .validators
+                                    .get(validator_index as usize)
+                                    .map(|v| v.attestation_public_key)
+                                    .ok_or_else(|| {
+                                        anyhow!(
+                                            "Validator index {validator_index} out of range \
+                                             during recursive aggregation"
+                                        )
+                                    })
+                            })
+                            .collect::<anyhow::Result<Vec<_>>>()?;
+                        Ok(ChildProof {
+                            public_keys,
+                            proof_data: proof.proof_data.to_vec(),
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                aggregate_signatures_recursive(
+                    &children,
+                    &xmss_keys,
+                    &xmss_signatures,
+                    &data_root.0,
+                    data.slot as u32,
+                )
+            } else {
+                aggregate_signatures(&xmss_keys, &xmss_signatures, &data_root.0, data.slot as u32)
+            };
             stop_timer(building_timer);
             let aggregated_signature = aggregated_signature_bytes?;
             inc_int_counter_vec(&PQ_SIG_AGGREGATED_SIGNATURES_TOTAL, &[]);
             inc_int_counter_vec_by(
                 &PQ_SIG_ATTESTATIONS_IN_AGGREGATED_SIGNATURES_TOTAL,
-                raw_entries.len() as u64,
+                covered_validators.len() as u64,
                 &[],
             );
 
