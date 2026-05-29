@@ -552,6 +552,111 @@ lazy_static::lazy_static! {
     ).expect("failed to create IS_AGGREGATOR int gauge vec");
 }
 
+/// Force-initialize every lazy_static metric so all metrics appear in
+/// `/metrics` from the very first Prometheus scrape, even before any
+/// observations are recorded.
+///
+/// For no-label `*Vec` metrics a bare `lazy_static::initialize` only
+/// registers the metric family descriptor; the individual time-series entry
+/// is not emitted until `with_label_values` is called at least once.
+/// Calling `.with_label_values(&[])` here creates that entry without
+/// recording any value. Labeled metrics (e.g. `PROPOSE_BLOCK_TIME`) are
+/// only force-registered — their label combinations are populated on first
+/// use as normal.
+pub fn init() {
+    // ── Node info ────────────────────────────────────────────────────────
+    // These are set to real values in main.rs; just ensure registration.
+    lazy_static::initialize(&NODE_INFO);
+    lazy_static::initialize(&NODE_START_TIME_SECONDS);
+
+    // ── Block proposal (labeled: "section") ──────────────────────────────
+    lazy_static::initialize(&PROPOSE_BLOCK_TIME);
+
+    // ── Sync / chain-head gauges ─────────────────────────────────────────
+    let _ = HEAD_SLOT.with_label_values(&[]);
+    let _ = CURRENT_SLOT.with_label_values(&[]);
+    let _ = SAFE_TARGET_SLOT.with_label_values(&[]);
+    let _ = JUSTIFIED_SLOT.with_label_values(&[]);
+    let _ = FINALIZED_SLOT.with_label_values(&[]);
+    let _ = LATEST_JUSTIFIED_SLOT.with_label_values(&[]);
+    let _ = LATEST_FINALIZED_SLOT.with_label_values(&[]);
+    let _ = VALIDATORS_COUNT.with_label_values(&[]);
+
+    // ── Fork-choice ──────────────────────────────────────────────────────
+    let _ = FORK_CHOICE_BLOCK_PROCESSING_TIME.with_label_values(&[]);
+    let _ = ATTESTATIONS_VALID_TOTAL.with_label_values(&[]);
+    let _ = ATTESTATIONS_INVALID_TOTAL.with_label_values(&[]);
+    let _ = ATTESTATION_VALIDATION_TIME.with_label_values(&[]);
+    let _ = FORK_CHOICE_REORGS_TOTAL.with_label_values(&[]);
+    let _ = FORK_CHOICE_REORG_DEPTH.with_label_values(&[]);
+
+    // ── State transition ─────────────────────────────────────────────────
+    let _ = STATE_TRANSITION_TIME.with_label_values(&[]);
+    let _ = STATE_TRANSITION_BLOCK_PROCESSING_TIME.with_label_values(&[]);
+    let _ = STATE_TRANSITION_SLOTS_PROCESSED_TOTAL.with_label_values(&[]);
+    let _ = STATE_TRANSITION_SLOTS_PROCESSING_TIME.with_label_values(&[]);
+    let _ = STATE_TRANSITION_ATTESTATIONS_PROCESSED_TOTAL.with_label_values(&[]);
+    let _ = STATE_TRANSITION_ATTESTATIONS_PROCESSING_TIME.with_label_values(&[]);
+
+    // ── Finalization (labeled: "result") ─────────────────────────────────
+    lazy_static::initialize(&FINALIZATIONS_TOTAL);
+
+    // ── PQ signature — attestation ───────────────────────────────────────
+    let _ = PQ_SIG_ATTESTATION_SIGNING_TIME.with_label_values(&[]);
+    let _ = PQ_SIG_ATTESTATION_VERIFICATION_TIME.with_label_values(&[]);
+    let _ = PQ_SIG_ATTESTATION_SIGNATURES_TOTAL.with_label_values(&[]);
+    let _ = PQ_SIG_ATTESTATION_SIGNATURES_VALID_TOTAL.with_label_values(&[]);
+    let _ = PQ_SIG_ATTESTATION_SIGNATURES_INVALID_TOTAL.with_label_values(&[]);
+
+    // ── PQ signature — aggregated ────────────────────────────────────────
+    let _ = PQ_SIG_AGGREGATED_SIGNATURES_TOTAL.with_label_values(&[]);
+    let _ = PQ_SIG_ATTESTATIONS_IN_AGGREGATED_SIGNATURES_TOTAL.with_label_values(&[]);
+    let _ = PQ_SIG_AGGREGATED_SIGNATURES_VALID_TOTAL.with_label_values(&[]);
+    let _ = PQ_SIG_AGGREGATED_SIGNATURES_BUILDING_TIME.with_label_values(&[]);
+    let _ = PQ_SIG_AGGREGATED_SIGNATURES_INVALID_TOTAL.with_label_values(&[]);
+    let _ = PQ_SIG_AGGREGATED_SIGNATURES_VERIFICATION_TIME.with_label_values(&[]);
+
+    // ── Network ──────────────────────────────────────────────────────────
+    let _ = LEAN_PEER_COUNT.with_label_values(&[]);
+    let _ = LEAN_CONNECTION_EVENT_TOTAL.with_label_values(&[]);
+    let _ = LEAN_DISCONNECTION_EVENT_TOTAL.with_label_values(&[]);
+    let _ = ATTESTATION_COMMITTEE_SUBNET.with_label_values(&[]);
+    let _ = ATTESTATION_COMMITTEE_COUNT.with_label_values(&[]);
+
+    // ── Aggregation / payloads ───────────────────────────────────────────
+    let _ = GOSSIP_SIGNATURES.with_label_values(&[]);
+    let _ = LATEST_NEW_AGGREGATED_PAYLOADS.with_label_values(&[]);
+    let _ = LATEST_KNOWN_AGGREGATED_PAYLOADS.with_label_values(&[]);
+    let _ = COMMITTEE_SIGNATURES_AGGREGATION_TIME.with_label_values(&[]);
+
+    // ── Block production ─────────────────────────────────────────────────
+    let _ = BLOCK_AGGREGATED_PAYLOADS.with_label_values(&[]);
+    let _ = BLOCK_BUILDING_PAYLOAD_AGGREGATION_TIME.with_label_values(&[]);
+    let _ = BLOCK_BUILDING_TIME.with_label_values(&[]);
+    let _ = BLOCK_BUILDING_SUCCESS_TOTAL.with_label_values(&[]);
+    let _ = BLOCK_BUILDING_FAILURES_TOTAL.with_label_values(&[]);
+
+    // ── Gossip message sizes ──────────────────────────────────────────────
+    let _ = GOSSIP_BLOCK_SIZE_BYTES.with_label_values(&[]);
+    let _ = GOSSIP_ATTESTATION_SIZE_BYTES.with_label_values(&[]);
+    let _ = GOSSIP_AGGREGATION_SIZE_BYTES.with_label_values(&[]);
+
+    // ── Validator ────────────────────────────────────────────────────────
+    let _ = ATTESTATIONS_PRODUCTION_TIME.with_label_values(&[]);
+    let _ = IS_AGGREGATOR.with_label_values(&[]);
+
+    // ── Gossip mesh (labeled: "client") ──────────────────────────────────
+    lazy_static::initialize(&LEAN_GOSSIP_MESH_PEERS);
+
+    // ── Tick interval ────────────────────────────────────────────────────
+    let _ = LEAN_TICK_INTERVAL_DURATION_SECONDS.with_label_values(&[]);
+
+    // ── Attestation aggregate coverage (labeled) ─────────────────────────
+    // Delegated to the existing helper which pre-populates all known label
+    // combinations for subnets, sections, and directions.
+    init_aggregate_coverage_metrics();
+}
+
 pub fn init_aggregate_coverage_metrics() {
     for &section in ATTESTATION_AGGREGATE_COVERAGE_SECTIONS {
         set_int_gauge_vec(&LEAN_ATTESTATION_AGGREGATE_SUBNETS, 0, &[section]);

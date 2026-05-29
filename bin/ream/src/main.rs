@@ -55,7 +55,7 @@ use ream_fork_choice_lean::{
 };
 use ream_keystore::keystore::EncryptedKeystore;
 use ream_metrics::{
-    ATTESTATION_COMMITTEE_SUBNET, NODE_INFO, NODE_START_TIME_SECONDS, set_int_gauge_vec,
+    ATTESTATION_COMMITTEE_SUBNET, NODE_INFO, NODE_START_TIME_SECONDS, init, set_int_gauge_vec,
 };
 use ream_network_manager::service::NetworkManagerService;
 use ream_network_spec::networks::{
@@ -219,6 +219,11 @@ pub async fn run_lean_node(config: LeanNodeConfig, executor: ReamExecutor, ream_
             "Metrics started on {}:{}",
             config.metrics_address, config.metrics_port
         );
+
+        // Force-register every metric so all appear in /metrics from the
+        // very first scrape, including aggregator-only histograms that would
+        // otherwise stay invisible until their code path is first triggered.
+        init();
 
         // Set node info metrics
         set_int_gauge_vec(&NODE_INFO, 1, &["ream", REAM_VERSION]);
