@@ -5,9 +5,11 @@ use ream_chain_lean::{
     clock::{create_lean_clock_interval, get_initial_tick_count},
     messages::{LeanChainServiceMessage, ServiceResponse},
 };
+#[cfg(feature = "devnet4")]
+use ream_consensus_lean::block::BlockSignatures;
 use ream_consensus_lean::{
     attestation::SignedAttestation,
-    block::{BlockSignatures, BlockWithSignatures, SignedBlock},
+    block::{BlockWithSignatures, SignedBlock},
 };
 use ream_consensus_misc::constants::lean::{INTERVALS_PER_SLOT, attestation_committee_count};
 use ream_fork_choice_lean::store::compute_subnet_id;
@@ -19,6 +21,12 @@ use ream_metrics::{
     start_timer, stop_timer,
 };
 use ream_network_spec::networks::lean_network_spec;
+#[cfg(feature = "devnet5")]
+use ream_post_quantum_crypto::lean_multisig::type2::{
+    type1_aggregate, type1_from_wire, type2_merge, type2_to_wire,
+};
+#[cfg(feature = "devnet5")]
+use ssz_types::VariableList;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{Level, debug, enabled, info, warn};
 use tree_hash::TreeHash;
@@ -78,7 +86,7 @@ impl ValidatorService {
                                     .expect("Failed to send produce block to LeanChainService");
 
                                 // Wait for the block to be produced.
-                                let BlockWithSignatures { block, signatures } = match rx.await {
+                                let block_with_signatures = match rx.await {
                                     Ok(ServiceResponse::Ok(block_with_signatures)) => block_with_signatures,
                                     Ok(ServiceResponse::Syncing) => {
                                         warn!("LeanChainService is syncing, cannot produce block for slot {slot}");
@@ -95,6 +103,8 @@ impl ValidatorService {
                                     }
                                 };
 
+                                let block = block_with_signatures.block.clone();
+
                                 info!(
                                     slot = block.slot,
                                     block_root = ?block.tree_hash_root(),
@@ -102,17 +112,13 @@ impl ValidatorService {
                                     keystore.index,
                                 );
 
-                                let timer = start_timer(&PQ_SIG_ATTESTATION_SIGNING_TIME, &[]);
-                                let proposer_signature = keystore.proposal_private_key.sign(&block.tree_hash_root(), slot as u32)?;
-                                stop_timer(timer);
-                                inc_int_counter_vec(&PQ_SIG_ATTESTATION_SIGNATURES_TOTAL, &[]);
-
-                                let signed_block = SignedBlock {
-                                    block: block.clone(),
-                                    signature: BlockSignatures {
-                                        attestation_signatures: signatures,
-                                        proposer_signature,
-                                    },
+                                let signed_block = match self.sign_block(keystore, block_with_signatures, slot) {
+                                    Ok(signed_block) => signed_block,
+                                    Err(err) => {
+                                        warn!("Failed to sign block for slot {slot}: {err}");
+                                        tick_count += 1;
+                                        continue;
+                                    }
                                 };
 
                                 // Send block to the LeanChainService.
@@ -235,5 +241,105 @@ impl ValidatorService {
         self.keystores
             .iter()
             .find(|keystore| keystore.index == proposer_index as u64)
+    }
+
+    /// Sign a produced block and wrap it into a `SignedBlock` for publishing.
+    ///
+    /// Devnet4: the proposer signs the block root and the per-attestation proofs
+    /// travel alongside in `BlockSignatures`.
+    #[cfg(feature = "devnet4")]
+    fn sign_block(
+        &self,
+        keystore: &ValidatorKeystore,
+        block_with_signatures: BlockWithSignatures,
+        slot: u64,
+    ) -> anyhow::Result<SignedBlock> {
+        let BlockWithSignatures { block, signatures } = block_with_signatures;
+
+        let timer = start_timer(&PQ_SIG_ATTESTATION_SIGNING_TIME, &[]);
+        let proposer_signature = keystore
+            .proposal_private_key
+            .sign(&block.tree_hash_root(), slot as u32)?;
+        stop_timer(timer);
+        inc_int_counter_vec(&PQ_SIG_ATTESTATION_SIGNATURES_TOTAL, &[]);
+
+        Ok(SignedBlock {
+            block,
+            signature: BlockSignatures {
+                attestation_signatures: signatures,
+                proposer_signature,
+            },
+        })
+    }
+
+    /// Sign a produced block and wrap it into a `SignedBlock` for publishing.
+    ///
+    /// Devnet5: the proposer signs the block root with its proposal key, wraps
+    /// that into a singleton Type-1 proof, reconstructs each per-attestation
+    /// Type-1 proof from its compact wire bytes (using the participant pubkeys
+    /// threaded out of block production), and merges them all into a single
+    /// block-level Type-2 proof stored on `SignedBlock.proof`. Order matters:
+    /// the proposer component is last, parallel to `body.attestations + 1`,
+    /// matching `verify_signatures`.
+    #[cfg(feature = "devnet5")]
+    fn sign_block(
+        &self,
+        keystore: &ValidatorKeystore,
+        block_with_signatures: BlockWithSignatures,
+        slot: u64,
+    ) -> anyhow::Result<SignedBlock> {
+        let BlockWithSignatures {
+            block,
+            signatures,
+            attestation_public_keys,
+        } = block_with_signatures;
+
+        if signatures.len() != attestation_public_keys.len() {
+            return Err(anyhow!(
+                "Attestation proof count ({}) does not match pubkey-set count ({})",
+                signatures.len(),
+                attestation_public_keys.len()
+            ));
+        }
+
+        let block_root = block.tree_hash_root();
+        let block_root_bytes: [u8; 32] = block_root.into();
+
+        // Sign the block root with the proposal key.
+        let timer = start_timer(&PQ_SIG_ATTESTATION_SIGNING_TIME, &[]);
+        let proposer_signature = keystore
+            .proposal_private_key
+            .sign(&block_root, slot as u32)?;
+        stop_timer(timer);
+        inc_int_counter_vec(&PQ_SIG_ATTESTATION_SIGNATURES_TOTAL, &[]);
+
+        // Reconstruct each per-attestation Type-1 proof from its wire bytes.
+        let mut components = Vec::with_capacity(signatures.len() + 1);
+        for (proof, pubkeys) in signatures.iter().zip(attestation_public_keys.iter()) {
+            let component = type1_from_wire(&proof.proof, pubkeys)
+                .map_err(|err| anyhow!("Failed to reconstruct attestation Type-1 proof: {err}"))?;
+            components.push(component);
+        }
+
+        // Wrap the proposer's raw signature into a singleton Type-1 over the
+        // block root, then append it as the final component.
+        let proposer_type_1 = type1_aggregate(
+            &[],
+            &[(keystore.proposal_public_key, proposer_signature)],
+            &block_root_bytes,
+            slot as u32,
+        )
+        .map_err(|err| anyhow!("Failed to build proposer Type-1 proof: {err}"))?;
+        components.push(proposer_type_1);
+
+        // Merge all components into one Type-2 proof.
+        let merged = type2_merge(components)
+            .map_err(|err| anyhow!("Failed to merge block Type-2 proof: {err}"))?;
+
+        Ok(SignedBlock {
+            block,
+            proof: VariableList::new(type2_to_wire(&merged))
+                .map_err(|err| anyhow!("Block proof exceeds size limit: {err:?}"))?,
+        })
     }
 }

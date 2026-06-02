@@ -12,15 +12,19 @@ use anyhow::{anyhow, ensure};
 use ream_consensus_lean::attestation::AggregatedSignatureProof;
 #[cfg(feature = "devnet5")]
 use ream_consensus_lean::attestation::TypeOneMultiSignature;
+#[cfg(feature = "devnet4")]
+use ream_consensus_lean::block::BlockSignatures;
 use ream_consensus_lean::{
     attestation::{
         AggregatedAttestation, AggregatedAttestations, AttestationData, SignedAttestation,
     },
-    block::{Block, BlockBody, BlockHeader, BlockSignatures, SignedBlock},
+    block::{Block, BlockBody, BlockHeader, SignedBlock},
     checkpoint::Checkpoint,
     config::Config,
     state::LeanState,
     validator::Validator,
+    // BlockSignatures only exists on devnet4; devnet5 folds signatures into a
+    // single block proof.
 };
 use ream_post_quantum_crypto::leansig::{
     public_key::PublicKey,
@@ -352,6 +356,7 @@ pub struct BlockSignaturesJSON {
     pub proposer_signature: String,
 }
 
+#[cfg(feature = "devnet4")]
 impl TryFrom<&BlockSignaturesJSON> for BlockSignatures {
     type Error = anyhow::Error;
 
@@ -378,6 +383,7 @@ pub struct SignedBlockJSON {
     pub signature: BlockSignaturesJSON,
 }
 
+#[cfg(feature = "devnet4")]
 impl TryFrom<&SignedBlockJSON> for SignedBlock {
     type Error = anyhow::Error;
 
@@ -385,6 +391,22 @@ impl TryFrom<&SignedBlockJSON> for SignedBlock {
         Ok(Self {
             block: (&value.block).try_into()?,
             signature: (&value.signature).try_into()?,
+        })
+    }
+}
+
+// Devnet5 SignedBlock carries a single opaque block proof rather than a
+// per-attestation signature list. The SSZ fixtures still describe the devnet4
+// shape, so this conversion drops the signature payload (round-trip fixtures
+// that exercise it are devnet4-only) and emits a blank proof.
+#[cfg(feature = "devnet5")]
+impl TryFrom<&SignedBlockJSON> for SignedBlock {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &SignedBlockJSON) -> anyhow::Result<Self> {
+        Ok(Self {
+            block: (&value.block).try_into()?,
+            proof: VariableList::empty(),
         })
     }
 }
