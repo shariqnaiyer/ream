@@ -352,10 +352,13 @@ impl Store {
                 self.accept_new_attestations().await?;
             }
         } else if current_interval == 2 {
-            // Interval 2: Only aggregate signatures if aggregator
-            if is_aggregator {
-                self.aggregate().await?;
-            }
+            // Interval 2: committee-signature aggregation is handled OFF this lock
+            // by LeanChainService (it owns the p2p gossip sender). The hash-based
+            // proving is CPU-heavy (~1s+ on non-M4 cores); running it here under the
+            // Store write lock would starve on_tick/attestation intake. The chain
+            // service spawns `aggregate_with_store` on a cloned DB handle and gossips
+            // the resulting aggregates every slot so every node's safe target stays
+            // converged. Nothing to do here.
         } else if current_interval == 3 {
             // Interval 3: Update safe target
             self.update_safe_target().await?;
@@ -446,17 +449,42 @@ impl Store {
     }
 
     pub async fn get_attestation_target(&self) -> anyhow::Result<Checkpoint> {
-        let (head_provider, block_provider, safe_target_provider, latest_finalized_provider) = {
+        let (
+            head_provider,
+            block_provider,
+            safe_target_provider,
+            latest_justified_provider,
+            state_provider,
+        ) = {
             let db = self.store.lock().await;
             (
                 db.head_provider(),
                 db.block_provider(),
                 db.safe_target_provider(),
-                db.latest_finalized_provider(),
+                db.latest_justified_provider(),
+                db.state_provider(),
             )
         };
 
-        let mut target_block_root = head_provider.get()?;
+        let head_root = head_provider.get()?;
+
+        // Justifiability must be judged against the HEAD STATE's finalized slot, not
+        // the store's `latest_finalized_provider`. The store value is a monotonic max
+        // over every processed block's parent-state finalized (see on_block), so it
+        // can EXCEED the head chain's finalized. If we walk the target back to a slot
+        // justifiable after the (higher) store-finalized, the proposer's
+        // `process_attestations` — which checks `is_justifiable_after(target,
+        // head_state.latest_finalized)` — rejects it as "Target slot not justifiable",
+        // wasting the vote and freezing justification. Using the head state's
+        // finalized keeps attesters and block processing (and converged peers) in
+        // agreement on the justifiable-slot set.
+        let head_finalized_slot = state_provider
+            .get(head_root)?
+            .ok_or(anyhow!("Head state not found for attestation target"))?
+            .latest_finalized
+            .slot;
+
+        let mut target_block_root = head_root;
 
         for _ in 0..JUSTIFICATION_LOOKBACK_SLOTS {
             if block_provider
@@ -480,14 +508,13 @@ impl Store {
             }
         }
 
-        let latest_finalized_slot = latest_finalized_provider.get()?.slot;
         while !is_justifiable_after(
             block_provider
                 .get(target_block_root)?
                 .ok_or(anyhow!("Block not found for target block root"))?
                 .block
                 .slot,
-            latest_finalized_slot,
+            head_finalized_slot,
         )? {
             target_block_root = block_provider
                 .get(target_block_root)?
@@ -499,6 +526,18 @@ impl Store {
         let target_block = block_provider
             .get(target_block_root)?
             .ok_or(anyhow!("Block not found for target block root"))?;
+
+        // Guard (from ethlambda): the justifiable walk-back has no lower bound, so
+        // it can land BEHIND the latest justified checkpoint (e.g. when a block
+        // advanced latest_justified between safe-target updates). Such a target has
+        // target.slot < source.slot (source = latest_justified), fails is_valid_vote
+        // (Rule 5: target.slot > source.slot), and is discarded at processing —
+        // wasting the vote and worsening the justification spiral. Clamp the target
+        // up to the justified checkpoint so the vote stays valid.
+        let latest_justified = latest_justified_provider.get()?;
+        if target_block.block.slot < latest_justified.slot {
+            return Ok(latest_justified);
+        }
 
         Ok(Checkpoint {
             root: target_block_root,
@@ -517,7 +556,6 @@ impl Store {
     }
 
     fn state_aggregate(
-        &self,
         head_state: &LeanState,
         attestations: &[AggregatedAttestations],
         gossip_signatures_provider: &GossipSignaturesTable,
@@ -803,7 +841,21 @@ impl Store {
         let mut processed_attestation_data: HashSet<AttestationData> = HashSet::new();
 
         let mut sorted_candidates: Vec<_> = available_signed_attestations.values().collect();
-        sorted_candidates.sort_by_key(|signed_attestation| signed_attestation.message.target.slot);
+        // Order by (target.slot, source.slot, attestation.slot) ascending. Sorting by
+        // target.slot first packs the oldest unjustified targets earliest so that, when
+        // MAX_ATTESTATIONS_DATA caps a pass, the entries that justify the lowest slots
+        // (and thus form the consecutive source->target checkpoints 3SF finalization
+        // needs) are kept. The source.slot/attestation.slot tiebreaks make selection
+        // deterministic and prefer the smallest source, which is the candidate most
+        // likely to satisfy try_finalize's "no justifiable slot strictly between source
+        // and target" condition.
+        sorted_candidates.sort_by_key(|signed_attestation| {
+            (
+                signed_attestation.message.target.slot,
+                signed_attestation.message.source.slot,
+                signed_attestation.message.slot,
+            )
+        });
 
         loop {
             let mut new_attestations: VariableList<AggregatedAttestations, U4096> =
@@ -860,6 +912,19 @@ impl Store {
                     || data.target == current_justified;
 
                 if !is_genesis_self_vote && target_is_justified {
+                    continue;
+                }
+
+                // Mirror the state-transition acceptance rule (process_attestations):
+                // a non-genesis target whose slot is not justifiable relative to the
+                // PROJECTED finalized slot will be silently dropped by the STF. Pre-
+                // filtering here keeps the projected justified_slots consistent with
+                // what process_block will actually justify, so the fixed-point loop
+                // can cascade toward the consecutive justified checkpoints that 3SF
+                // finalization requires instead of selecting votes the STF discards.
+                if !is_genesis_self_vote
+                    && !is_justifiable_after(data.target.slot, current_finalized_slot)?
+                {
                     continue;
                 }
 
@@ -1471,7 +1536,33 @@ impl Store {
         Ok(attestations)
     }
 
-    pub async fn aggregate(&mut self) -> anyhow::Result<Vec<SignedAggregatedAttestation>> {
+    pub async fn aggregate(&self) -> anyhow::Result<Vec<SignedAggregatedAttestation>> {
+        Self::aggregate_with_store(&self.store).await
+    }
+
+    /// Build committee-signature aggregates from the given DB handle, without
+    /// requiring the outer `Store` (RwLock) write lock. The hash-based proving in
+    /// `state_aggregate` is CPU-heavy (~1s+ on non-M4 cores); running it off the
+    /// consensus event loop (see `tick_interval`) keeps `on_tick` and attestation
+    /// intake responsive, so the aggregator captures a timely 2/3 of attestations
+    /// and 3SF justification advances consecutively to finality.
+    pub async fn aggregate_with_store(
+        store: &Arc<Mutex<LeanDB>>,
+    ) -> anyhow::Result<Vec<SignedAggregatedAttestation>> {
+        let signed = Self::aggregate_compute(store).await?;
+        Self::aggregate_commit(store, &signed).await?;
+        Ok(signed)
+    }
+
+    /// GATHER+PROVE phase of committee-signature aggregation. Builds providers
+    /// from `store`, gathers attestation signatures and payload proofs, then runs
+    /// the CPU-heavy `state_aggregate` proving. Performs NO commit writes, so it
+    /// can run off the consensus event loop without holding any locks across the
+    /// proving; the resulting aggregates are committed separately via
+    /// `aggregate_commit` to keep the DB write ordered relative to `on_tick`.
+    pub async fn aggregate_compute(
+        store: &Arc<Mutex<LeanDB>>,
+    ) -> anyhow::Result<Vec<SignedAggregatedAttestation>> {
         let (
             state_provider,
             attestation_signatures_provider,
@@ -1480,7 +1571,7 @@ impl Store {
             latest_known_aggregated_payloads_provider,
             attestation_data_by_root_provider,
         ) = {
-            let db = self.store.lock().await;
+            let db = store.lock().await;
             (
                 db.state_provider(),
                 db.attestation_signatures_provider(),
@@ -1535,7 +1626,7 @@ impl Store {
         }
 
         let aggregation_timer = start_timer(&COMMITTEE_SIGNATURES_AGGREGATION_TIME, &[]);
-        let signed_attestations = self.state_aggregate(
+        let signed_attestations = Self::state_aggregate(
             &head_state,
             &attestation_signatures,
             &attestation_signatures_provider,
@@ -1545,10 +1636,30 @@ impl Store {
         )?;
         stop_timer(aggregation_timer);
 
+        Ok(signed_attestations)
+    }
+
+    /// COMMIT phase of committee-signature aggregation. Given the aggregates
+    /// produced by `aggregate_compute`, rebuilds the next `latest_new` payload
+    /// proofs, drains+reinserts them, and retains only the still-unaggregated
+    /// attestation signatures. Kept separate so the commit can run inside the
+    /// chain service's ordered `select!` loop, serialized with `update_safe_target`.
+    pub async fn aggregate_commit(
+        store: &Arc<Mutex<LeanDB>>,
+        signed_attestations: &[SignedAggregatedAttestation],
+    ) -> anyhow::Result<()> {
+        let (latest_new_aggregated_payloads_provider, attestation_signatures_provider) = {
+            let db = store.lock().await;
+            (
+                db.latest_new_aggregated_payloads_provider(),
+                db.attestation_signatures_provider(),
+            )
+        };
+
         let mut aggregated_data_roots = HashSet::new();
         let mut next_new_payloads: HashMap<SignatureKey, Vec<PayloadProof>> = HashMap::new();
 
-        for signed_attestation in &signed_attestations {
+        for signed_attestation in signed_attestations {
             let data_root = signed_attestation.data.tree_hash_root();
             aggregated_data_roots.insert(data_root);
 
@@ -1568,7 +1679,7 @@ impl Store {
         attestation_signatures_provider
             .retain(|key| !aggregated_data_roots.contains(&key.data_root))?;
 
-        Ok(signed_attestations)
+        Ok(())
     }
 
     pub async fn compute_block_weights(&self) -> anyhow::Result<HashMap<B256, u64>> {

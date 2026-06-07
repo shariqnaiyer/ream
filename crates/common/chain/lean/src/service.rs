@@ -23,7 +23,7 @@ use ream_consensus_lean::{
     checkpoint::Checkpoint,
 };
 use ream_consensus_misc::constants::lean::{INTERVALS_PER_SLOT, attestation_committee_count};
-use ream_fork_choice_lean::store::LeanStoreWriter;
+use ream_fork_choice_lean::store::{LeanStoreWriter, Store};
 use ream_metrics::{
     ATTESTATION_COMMITTEE_COUNT as ATTESTATION_COMMITTEE_COUNT_METRIC,
     BLOCK_BUILDING_FAILURES_TOTAL, CURRENT_SLOT, IS_AGGREGATOR, inc_int_counter_vec,
@@ -317,6 +317,16 @@ impl LeanChainService {
         let mut interval = create_lean_clock_interval()
             .map_err(|err| anyhow!("Expected Ream to be started before genesis time: {err:?}"))?;
 
+        // Managed committee-signature aggregation session. The CPU-heavy proving
+        // (`aggregate_compute`) runs off the consensus loop in a spawned task; the
+        // result is routed back through this channel so the DB commit + gossip
+        // happen IN ORDER inside the `select!` loop (serialized with
+        // `update_safe_target` on interval 3). `aggregation_in_flight` is an
+        // overlap guard so a new session never starts while the prior is running.
+        let (aggregate_result_tx, mut aggregate_result_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Vec<SignedAggregatedAttestation>>();
+        let mut aggregation_in_flight = false;
+
         let mut sync_interval = tokio::time::interval(Duration::from_millis(50));
         sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut genesis_passed = SystemTime::now()
@@ -343,10 +353,60 @@ impl LeanChainService {
                     }
                     if self.sync_status == SyncStatus::Synced {
                         self.store.write().await.tick_interval(tick_count.is_multiple_of(INTERVALS_PER_SLOT), self.is_aggregator).await.expect("Failed to tick interval");
+
+                        // Interval 2: start a committee-signature aggregation
+                        // session, but only the CPU-heavy GATHER+PROVE phase, and
+                        // only if no prior session is still running (overlap guard).
+                        // The proving is CPU-heavy (~1s+ on non-M4 cores), so it runs
+                        // OFF the consensus loop on a cloned DB handle to keep on_tick
+                        // and attestation intake responsive. The result is sent back
+                        // through `aggregate_result_tx`, where the dedicated `select!`
+                        // branch commits to the DB and gossips IN ORDER relative to
+                        // `update_safe_target`, so aggregates land regularly and 3SF
+                        // justification advances consecutively to finality.
+                        if self.is_aggregator
+                            && tick_count % INTERVALS_PER_SLOT == 2
+                            && !aggregation_in_flight
+                        {
+                            aggregation_in_flight = true;
+                            let db = self.store.read().await.store.clone();
+                            let result_tx = aggregate_result_tx.clone();
+                            tokio::spawn(async move {
+                                // Always send a result (empty on error) so the
+                                // in-flight guard clears in the result branch.
+                                let aggregates = match Store::aggregate_compute(&db).await {
+                                    Ok(aggregates) => aggregates,
+                                    Err(err) => {
+                                        warn!("Committee-signature aggregation compute failed: {err:?}");
+                                        Vec::new()
+                                    }
+                                };
+                                let _ = result_tx.send(aggregates);
+                            });
+                        }
+
                         self.step_head_sync(tick_count).await?;
                     }
 
                     tick_count += 1;
+                }
+                Some(aggregates) = aggregate_result_rx.recv() => {
+                    // Completed aggregation session: clear the overlap guard, then
+                    // commit + gossip IN ORDER within this loop (serialized with
+                    // `update_safe_target` on interval 3). The sender is held by the
+                    // loop (and outstanding spawns), so `recv()` never returns None.
+                    aggregation_in_flight = false;
+                    if !aggregates.is_empty() {
+                        let db = self.store.read().await.store.clone();
+                        if let Err(err) = Store::aggregate_commit(&db, &aggregates).await {
+                            warn!("Committee-signature aggregation commit failed: {err:?}");
+                        }
+                        for aggregate in aggregates {
+                            let _ = self.outbound_p2p.send(
+                                LeanP2PRequest::GossipAggregatedAttestation(Box::new(aggregate)),
+                            );
+                        }
+                    }
                 }
                 _ = sync_interval.tick(), if genesis_passed => {
                     if self.sync_status != SyncStatus::Synced || self.should_run_backfill_sync().await {

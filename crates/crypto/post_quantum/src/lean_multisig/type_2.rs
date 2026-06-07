@@ -8,7 +8,12 @@ use lean_multisig_type2::{
 
 use crate::leansig::{public_key::PublicKey, signature::Signature};
 
-pub const LOG_INV_RATE: usize = 2;
+// log(1/rate) for WHIR. On slower (non-M4) cores the committee-signature
+// aggregation dominates the consensus interval; with conjectured security
+// (prox-gaps-conjecture) rate=1 is the fastest proving point on EPYC (~2.3x
+// vs the previous proven rate=2), letting the aggregator keep the attestation
+// window so 3SF justification advances consecutively and finalizes.
+pub const LOG_INV_RATE: usize = 1;
 
 pub fn type_2_setup() {
     setup_prover();
