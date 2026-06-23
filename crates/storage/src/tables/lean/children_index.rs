@@ -81,6 +81,24 @@ impl LeanChildrenIndexTable {
         Ok(children_map)
     }
 
+    /// Build a `root -> (parent_root, slot)` map from this index in a single
+    /// lightweight scan (each entry is a ~40 byte decode, not a full
+    /// `SignedBlock`). LMD GHOST's per-attestation ancestry walk uses this map
+    /// in memory instead of doing a full-block DB read per ancestor per
+    /// validator, which is O(validators × (head − justified)) full-block decodes
+    /// and dominates block-import time when finalization lags.
+    pub fn get_index_map(&self) -> Result<HashMap<B256, (B256, u64)>, StoreError> {
+        let mut index_map = HashMap::<B256, (B256, u64)>::new();
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(Self::TABLE_DEFINITION)?;
+        for entry in table.iter()? {
+            let (root_entry, value_entry) = entry?;
+            let value = value_entry.value();
+            index_map.insert(root_entry.value(), (value.parent_root, value.slot));
+        }
+        Ok(index_map)
+    }
+
     /// Remove index entries for blocks below `finalized_slot`.
     pub fn prune_finalized(&self, finalized_slot: u64) -> Result<usize, StoreError> {
         let stale_roots: Vec<B256> = {
