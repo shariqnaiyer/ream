@@ -5,9 +5,7 @@ use ream_metrics::{
     PQ_SIG_AGGREGATED_SIGNATURES_VERIFICATION_TIME, inc_int_counter_vec, start_timer, stop_timer,
 };
 #[cfg(feature = "devnet4")]
-use ream_metrics::{
-    PQ_SIG_ATTESTATION_SIGNATURES_INVALID_TOTAL, PQ_SIG_ATTESTATION_SIGNATURES_VALID_TOTAL,
-};
+use ream_metrics::PQ_SIG_ATTESTATION_SIGNATURES_VALID_TOTAL;
 #[cfg(feature = "devnet4")]
 use ream_post_quantum_crypto::lean_multisig::aggregate::verify_aggregate_signature;
 #[cfg(feature = "devnet5")]
@@ -66,6 +64,15 @@ impl SignedBlock {
 
         let validators = &parent_state.validators;
 
+        // Prepare verification inputs sequentially (cheap: bit scan + bounds + pubkey
+        // lookup), then run the EXPENSIVE WHIR verification in PARALLEL across cores
+        // (the spec verifies a block's aggregate signatures this way). A block
+        // can carry several aggregated attestations; verifying them sequentially on
+        // the event-loop thread blocks it for N × ~60ms, so busy nodes (especially
+        // aggregators also running proving) fall behind on import → head-spread →
+        // safe_target can't track head. Parallel verification keeps import ~one-verify
+        // fast regardless of how many aggregates the block carries.
+        let mut verification_inputs = Vec::with_capacity(aggregated_attestations.len());
         for (aggregated_attestation, aggregated_signature) in aggregated_attestations
             .iter()
             .zip(attestation_signatures.iter())
@@ -99,35 +106,45 @@ impl SignedBlock {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            if verify_signatures {
-                let timer = start_timer(&PQ_SIG_AGGREGATED_SIGNATURES_VERIFICATION_TIME, &[]);
+            #[cfg(feature = "devnet4")]
+            let proof_bytes: &[u8] = aggregated_signature.proof_data.as_ref();
+            #[cfg(feature = "devnet5")]
+            let proof_bytes: &[u8] = aggregated_signature.proof.as_ref();
 
-                match verify_aggregate_signature(
-                    &public_keys,
-                    &attestation_root,
-                    #[cfg(feature = "devnet4")]
-                    aggregated_signature.proof_data.as_ref(),
-                    #[cfg(feature = "devnet5")]
-                    aggregated_signature.proof.as_ref(),
-                    aggregated_attestation.message.slot as u32,
-                ) {
-                    Ok(()) => {
-                        stop_timer(timer);
+            verification_inputs.push((
+                public_keys,
+                attestation_root,
+                proof_bytes,
+                aggregated_attestation.message.slot as u32,
+                validator_ids.len(),
+            ));
+        }
+
+        if verify_signatures {
+            use rayon::prelude::*;
+
+            let timer = start_timer(&PQ_SIG_AGGREGATED_SIGNATURES_VERIFICATION_TIME, &[]);
+            let result = verification_inputs.par_iter().try_for_each(
+                |(public_keys, attestation_root, proof_bytes, slot, _)| {
+                    verify_aggregate_signature(public_keys, attestation_root, proof_bytes, *slot)
+                },
+            );
+            stop_timer(timer);
+
+            match result {
+                Ok(()) => {
+                    for (_, _, _, _, validator_count) in &verification_inputs {
                         inc_int_counter_vec(&PQ_SIG_AGGREGATED_SIGNATURES_VALID_TOTAL, &[]);
-                        for _ in &validator_ids {
+                        for _ in 0..*validator_count {
                             inc_int_counter_vec(&PQ_SIG_ATTESTATION_SIGNATURES_VALID_TOTAL, &[]);
                         }
                     }
-                    Err(err) => {
-                        stop_timer(timer);
-                        inc_int_counter_vec(&PQ_SIG_AGGREGATED_SIGNATURES_INVALID_TOTAL, &[]);
-                        for _ in &validator_ids {
-                            inc_int_counter_vec(&PQ_SIG_ATTESTATION_SIGNATURES_INVALID_TOTAL, &[]);
-                        }
-                        return Err(anyhow!(
-                            "Attestation aggregated signature verification failed: {err}"
-                        ));
-                    }
+                }
+                Err(err) => {
+                    inc_int_counter_vec(&PQ_SIG_AGGREGATED_SIGNATURES_INVALID_TOTAL, &[]);
+                    return Err(anyhow!(
+                        "Attestation aggregated signature verification failed: {err}"
+                    ));
                 }
             }
         }
@@ -241,7 +258,7 @@ pub struct BlockWithAttestation {
 
 /// Represents a block in the Lean chain.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Encode, Decode, TreeHash)]
-pub struct Block {
+pub struct  Block {
     pub slot: u64,
     pub proposer_index: u64,
     // Diverged from Python implementation: Disallow `None` (uses `B256::ZERO` instead)
