@@ -43,6 +43,13 @@ devnet5 = [
 alloy-primitives.workspace = true
 anyhow.workspace = true
 bip39.workspace = true
+# jemalloc global allocator. The default glibc malloc retains freed memory in
+# per-thread arenas under the heavy multi-threaded WHIR proving/verification load,
+# so RSS bloats to >15GB even though live heap is small. jemalloc returns memory to
+# the OS, keeping RSS bounded (~400MB) instead of growing to >15GB.
+tikv-jemallocator = { version = "0.6", features = [
+    "unprefixed_malloc_on_supported_platforms",
+] }
 clap = { workspace = true, features = ["derive", "env"] }
 discv5.workspace = true
 ethereum_ssz.workspace = true
