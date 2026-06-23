@@ -8,6 +8,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+// Use jemalloc so the heavy multi-threaded WHIR proving/verification allocations
+// are returned to the OS instead of being hoarded in glibc per-thread arenas
+// (which bloated ream RSS to >15GB); jemalloc keeps RSS at ~400MB.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use alloy_primitives::hex;
 use bip39::Mnemonic;
 use libp2p_identity::secp256k1;
