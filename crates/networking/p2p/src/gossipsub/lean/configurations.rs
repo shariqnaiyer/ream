@@ -32,7 +32,16 @@ impl Default for LeanGossipsubConfig {
                     * lean_network_spec().seconds_per_slot
                     * 2,
             ))
-            .validate_messages()
+            // NOTE: do NOT enable `.validate_messages()`. That puts gossipsub in
+            // manual-validation mode, where a received message is NOT re-propagated
+            // to the rest of the mesh until the application calls
+            // `report_message_validation_result(Accept)`. ream never calls that
+            // anywhere, so with `.validate_messages()` set, blocks/attestations only
+            // ever reached the publisher's direct mesh peers (~mesh_n) and the
+            // remaining nodes had to backfill them — the root cause of the severe
+            // head-spread (dozens of slots) that froze finalization. Leaving it unset
+            // (manual validation off) lets gossipsub auto-forward after receipt → full
+            // multi-hop mesh propagation → tight heads → consecutive finalization.
             .validation_mode(ValidationMode::Anonymous)
             .allow_self_origin(true)
             .flood_publish(false)
