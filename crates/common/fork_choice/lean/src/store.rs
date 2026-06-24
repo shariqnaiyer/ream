@@ -503,17 +503,42 @@ impl Store {
     }
 
     pub async fn get_attestation_target(&self) -> anyhow::Result<Checkpoint> {
-        let (head_provider, block_provider, safe_target_provider, latest_finalized_provider) = {
+        let (
+            head_provider,
+            block_provider,
+            safe_target_provider,
+            latest_justified_provider,
+            state_provider,
+        ) = {
             let db = self.store.lock().await;
             (
                 db.head_provider(),
                 db.block_provider(),
                 db.safe_target_provider(),
-                db.latest_finalized_provider(),
+                db.latest_justified_provider(),
+                db.state_provider(),
             )
         };
 
-        let mut target_block_root = head_provider.get()?;
+        let head_root = head_provider.get()?;
+
+        // Justifiability must be judged against the HEAD STATE's finalized slot, not
+        // the store's `latest_finalized_provider`. The store value is a monotonic max
+        // over every processed block's parent-state finalized (see on_block), so it
+        // can EXCEED the head chain's finalized. If we walk the target back to a slot
+        // justifiable after the (higher) store-finalized, the proposer's
+        // `process_attestations` — which checks `is_justifiable_after(target,
+        // head_state.latest_finalized)` — rejects it as "Target slot not justifiable",
+        // wasting the vote and freezing justification/finalization. Using the head
+        // state's finalized keeps attesters and block processing (and converged peers)
+        // in agreement on the justifiable-slot set.
+        let head_finalized_slot = state_provider
+            .get(head_root)?
+            .ok_or(anyhow!("Head state not found for attestation target"))?
+            .latest_finalized
+            .slot;
+
+        let mut target_block_root = head_root;
 
         for _ in 0..JUSTIFICATION_LOOKBACK_SLOTS {
             if block_provider
@@ -537,14 +562,13 @@ impl Store {
             }
         }
 
-        let latest_finalized_slot = latest_finalized_provider.get()?.slot;
         while !is_justifiable_after(
             block_provider
                 .get(target_block_root)?
                 .ok_or(anyhow!("Block not found for target block root"))?
                 .block
                 .slot,
-            latest_finalized_slot,
+            head_finalized_slot,
         )? {
             target_block_root = block_provider
                 .get(target_block_root)?
@@ -556,6 +580,17 @@ impl Store {
         let target_block = block_provider
             .get(target_block_root)?
             .ok_or(anyhow!("Block not found for target block root"))?;
+
+        // Guard: the justifiable walk-back has no lower bound, so it can land BEHIND
+        // the latest justified checkpoint (e.g. when a block advanced latest_justified
+        // between safe-target updates). Such a target has target.slot < source.slot
+        // (source = latest_justified), fails is_valid_vote (Rule 5: target.slot >
+        // source.slot), and is discarded at processing — wasting the vote. Clamp the
+        // target up to the justified checkpoint so the vote stays valid.
+        let latest_justified = latest_justified_provider.get()?;
+        if target_block.block.slot < latest_justified.slot {
+            return Ok(latest_justified);
+        }
 
         Ok(Checkpoint {
             root: target_block_root,
