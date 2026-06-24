@@ -503,19 +503,12 @@ impl Store {
     }
 
     pub async fn get_attestation_target(&self) -> anyhow::Result<Checkpoint> {
-        let (
-            head_provider,
-            block_provider,
-            safe_target_provider,
-            latest_justified_provider,
-            state_provider,
-        ) = {
+        let (head_provider, block_provider, safe_target_provider, state_provider) = {
             let db = self.store.lock().await;
             (
                 db.head_provider(),
                 db.block_provider(),
                 db.safe_target_provider(),
-                db.latest_justified_provider(),
                 db.state_provider(),
             )
         };
@@ -532,11 +525,19 @@ impl Store {
         // wasting the vote and freezing justification/finalization. Using the head
         // state's finalized keeps attesters and block processing (and converged peers)
         // in agreement on the justifiable-slot set.
-        let head_finalized_slot = state_provider
+        // Use the HEAD STATE's finalized AND justified checkpoints (not the store's
+        // `latest_*_provider`, which are monotonic maxima that can EXCEED the head
+        // chain's real values). The attestation `source` is head_state.latest_justified,
+        // so target selection must reference the SAME justified/finalized the source and
+        // the proposer's `process_attestations` use — otherwise the vote spans
+        // store-justified..target while the block only knows head-justified, and it is
+        // rejected (observed: store justified=65 but head-state justified=20, source
+        // voted as 20, justification frozen at 20).
+        let head_state = state_provider
             .get(head_root)?
-            .ok_or(anyhow!("Head state not found for attestation target"))?
-            .latest_finalized
-            .slot;
+            .ok_or(anyhow!("Head state not found for attestation target"))?;
+        let head_finalized_slot = head_state.latest_finalized.slot;
+        let head_justified = head_state.latest_justified.clone();
 
         let mut target_block_root = head_root;
 
@@ -587,9 +588,8 @@ impl Store {
         // (source = latest_justified), fails is_valid_vote (Rule 5: target.slot >
         // source.slot), and is discarded at processing — wasting the vote. Clamp the
         // target up to the justified checkpoint so the vote stays valid.
-        let latest_justified = latest_justified_provider.get()?;
-        if target_block.block.slot < latest_justified.slot {
-            return Ok(latest_justified);
+        if target_block.block.slot < head_justified.slot {
+            return Ok(head_justified);
         }
 
         Ok(Checkpoint {
