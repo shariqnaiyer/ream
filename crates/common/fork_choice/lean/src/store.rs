@@ -1873,6 +1873,17 @@ impl Store {
         let mut keys: HashSet<AttestationData> = groups.keys().cloned().collect();
         keys.extend(new_payloads.keys().cloned());
 
+        // Bound aggregation to a RECENT slot window. When finalization lags, the
+        // unfinalized window grows and stale data_roots pile up (observed 719),
+        // so aggregate_prepare built hundreds of jobs under the store lock (24s
+        // ticks!) while the +750ms deadline proved only ~1/slot — and never the
+        // recent data_roots that advance safe_target. Keeping only recent
+        // data_roots keeps prepare cheap; in the healthy case (finalized tracks
+        // head) the window excludes nothing.
+        const AGG_RECENT_SLOTS: u64 = 16;
+        let head_slot = head_state.slot;
+        keys.retain(|data| data.slot + AGG_RECENT_SLOTS >= head_slot);
+
         let mut jobs = Vec::new();
         for data in keys {
             let data_root = data.tree_hash_root();
@@ -1953,6 +1964,9 @@ impl Store {
                 raw_count,
             });
         }
+        // Prove RECENT data_roots first so the +750ms deadline advances coverage at
+        // the head (where safe_target needs it) rather than on stale slots.
+        jobs.sort_by(|a, b| b.data.slot.cmp(&a.data.slot));
         Ok(jobs)
     }
 
