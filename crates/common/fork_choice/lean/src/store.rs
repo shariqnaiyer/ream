@@ -980,6 +980,20 @@ impl Store {
                     continue;
                 }
 
+                // Mirror the state-transition acceptance rule (process_attestations):
+                // a non-genesis target whose slot is not justifiable relative to the
+                // PROJECTED finalized slot will be silently dropped by the STF. Pre-
+                // filtering here keeps the projected justified_slots consistent with
+                // what process_block will actually justify, so the fixed-point loop
+                // cascades toward the CONSECUTIVE justified checkpoints that 3SF
+                // finalization requires instead of selecting far targets the STF
+                // discards (which leap-frog justification and freeze finalization).
+                if !is_genesis_self_vote
+                    && !is_justifiable_after(data.target.slot, current_finalized_slot)?
+                {
+                    continue;
+                }
+
                 let validator_id = signed_attestation.validator_id;
                 let attestation = AggregatedAttestations {
                     validator_id,
