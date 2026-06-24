@@ -2915,20 +2915,37 @@ impl LeanChainService {
 
         if head_slot > STATE_RETENTION_SLOTS {
             let prune_target_slot = head_slot - STATE_RETENTION_SLOTS;
-            let block_root = slot_index_provider
-                .get(prune_target_slot)?
-                .ok_or_else(|| anyhow!("Block root not found for slot: {prune_target_slot}"))?;
+            // prune_target_slot can be an EMPTY slot (a proposer missed it, common under
+            // load). Don't abort the whole pruning cycle in that case — walk down to the
+            // nearest earlier slot that actually has a block. Aborting here left state
+            // (and, via the early `?` in the caller, every later prune step) un-run, so
+            // the working set ballooned and build_block slowed, making proposers miss
+            // even more slots — a death spiral.
+            let mut scan = prune_target_slot;
+            let mut prune_root = None;
+            loop {
+                if let Some(root) = slot_index_provider.get(scan)? {
+                    prune_root = Some((scan, root));
+                    break;
+                }
+                if scan == 0 {
+                    break;
+                }
+                scan -= 1;
+            }
 
-            info!(
-                slot = get_current_slot(),
-                tick = tick_count,
-                prune_slot = prune_target_slot,
-                prune_block_root = ?block_root,
-                "Pruning old lean state"
-            );
+            if let Some((prune_slot, block_root)) = prune_root {
+                info!(
+                    slot = get_current_slot(),
+                    tick = tick_count,
+                    prune_slot,
+                    prune_block_root = ?block_root,
+                    "Pruning old lean state"
+                );
 
-            if let Err(err) = state_provider.remove(block_root) {
-                warn!("Failed to prune old lean state: {err:?}");
+                if let Err(err) = state_provider.remove(block_root) {
+                    warn!("Failed to prune old lean state: {err:?}");
+                }
             }
         }
         Ok(())
