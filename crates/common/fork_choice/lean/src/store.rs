@@ -366,11 +366,16 @@ impl Store {
     }
 
     pub async fn accept_new_attestations(&mut self) -> anyhow::Result<()> {
-        let (latest_new_aggregated_payloads_provider, latest_known_aggregated_payloads_provider) = {
+        let (
+            latest_new_aggregated_payloads_provider,
+            latest_known_aggregated_payloads_provider,
+            attestation_data_by_root_provider,
+        ) = {
             let db = self.store.lock().await;
             (
                 db.latest_new_aggregated_payloads_provider(),
                 db.latest_known_aggregated_payloads_provider(),
+                db.attestation_data_by_root_provider(),
             )
         };
 
@@ -385,6 +390,38 @@ impl Store {
             existing_proofs.append(&mut new_proofs);
 
             latest_known_aggregated_payloads_provider.insert(signature_key, existing_proofs)?;
+        }
+
+        // Fork choice is latest-message-driven (extract_attestations_from_aggregated_payloads
+        // keeps only each validator's highest-slot attestation), so older per-validator
+        // payloads are dead weight. While finalization is stalled, the finalized-gated
+        // prune_stale_attestation_data cannot reclaim them, so the known-payload store
+        // (multi-KB proofs each) grows without bound (observed 4084) — which slowed
+        // build_block to ~1.6s (> the 800ms sub-slot), so proposers MISSED slots → empty
+        // slots → fork-choice gaps → leap-frog. Evict any payload superseded by a newer
+        // attestation from the SAME validator, keeping the buffer flat across stalls.
+        let known = latest_known_aggregated_payloads_provider.iter()?;
+        let mut validator_max_slot: HashMap<u64, u64> = HashMap::new();
+        let mut key_slots: Vec<(SignatureKey, u64)> = Vec::with_capacity(known.len());
+        for (key, _) in &known {
+            let slot = attestation_data_by_root_provider
+                .get(key.data_root)?
+                .map(|data| data.slot)
+                .unwrap_or(0);
+            key_slots.push((key.clone(), slot));
+            validator_max_slot
+                .entry(key.validator_id)
+                .and_modify(|max| *max = (*max).max(slot))
+                .or_insert(slot);
+        }
+        let superseded: HashSet<SignatureKey> = key_slots
+            .into_iter()
+            .filter(|(key, slot)| *slot < validator_max_slot[&key.validator_id])
+            .map(|(key, _)| key)
+            .collect();
+        if !superseded.is_empty() {
+            latest_known_aggregated_payloads_provider
+                .retain(|key, _| !superseded.contains(key))?;
         }
 
         set_int_gauge_vec(
