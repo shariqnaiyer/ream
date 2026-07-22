@@ -2207,6 +2207,7 @@ impl Store {
         const AGG_RECENT_SLOTS: u64 = 16;
         let head_slot = head_state.slot;
         keys.retain(|data| data.slot + AGG_RECENT_SLOTS >= head_slot);
+        keys.retain(|data| data.source == head_state.latest_justified);
 
         let mut jobs = Vec::new();
         for data in keys {
