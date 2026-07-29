@@ -10,9 +10,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [features]
-optimized-leanvm = [
-    "ream-validator-beacon/optimized-leanvm",
-]
+optimized-leanvm = ["ream-validator-beacon/optimized-leanvm"]
 
 [dependencies]
 alloy-primitives.workspace = true

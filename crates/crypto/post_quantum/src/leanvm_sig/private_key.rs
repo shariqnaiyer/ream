@@ -5,8 +5,7 @@ use anyhow::anyhow;
 use lean_multisig_optimized::{XmssSecretKey, xmss_key_gen_from_seed, xmss_sign};
 use rand_0_10::Rng;
 
-use super::errors::LeanSigError;
-use super::{public_key::PublicKey, signature::Signature};
+use super::{errors::LeanSigError, public_key::PublicKey, signature::Signature};
 
 pub type LeanSigPrivateKey = XmssSecretKey;
 
