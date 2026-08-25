@@ -2,6 +2,7 @@ use std::{
     collections::BTreeSet,
     env, fs,
     net::SocketAddr,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process,
     sync::Arc,
@@ -16,6 +17,7 @@ use ream::{
         Cli, Commands,
         account_manager::AccountManagerConfig,
         beacon_node::BeaconNodeConfig,
+        data_availability_node::DataAvailabilityNodeConfig,
         generate_private_key::GeneratePrivateKeyConfig,
         generate_validator_registry::run_generate_validator_registry,
         import_keystores::{load_keystore_directory, load_password_from_config, process_password},
@@ -47,6 +49,10 @@ use ream_consensus_misc::{
     },
     misc::compute_epoch_at_slot,
 };
+use ream_data_availability_node::{
+    ingest::ingest_channel, service::DataAvailabilityVerificationService, store::FileColumnStore,
+};
+use ream_data_availability_verifier_kzg::KzgVerifier;
 use ream_events_beacon::BeaconEvent;
 use ream_execution_engine::ExecutionEngine;
 use ream_executor::ReamExecutor;
@@ -112,6 +118,7 @@ compile_error!("the `jemalloc` feature is incompatible with `shadow-integration`
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 pub const APP_NAME: &str = "ream";
+const DATA_AVAILABILITY_VERIFICATION_QUEUE_CAPACITY: usize = 256;
 const DEFAULT_QUIET_LOG_TARGETS: &str = "libp2p_gossipsub::behaviour=error";
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
@@ -168,6 +175,9 @@ fn main() {
                 ReamDB::new(ream_directory.clone()).expect("unable to init Ream Database");
             executor_clone.spawn(async move { run_beacon_node(*config, executor, ream_db).await })
         }
+        Commands::DataAvailabilityNode(config) => executor_clone.spawn(async move {
+            run_data_availability_node(*config, executor, ream_directory).await
+        }),
         Commands::ValidatorNode(config) => {
             executor_clone.spawn(async move { run_validator_node(*config, executor).await })
         }
@@ -669,6 +679,72 @@ async fn run_beacon_node_for_test(
     ream_db: ReamDB,
 ) {
     run_beacon_node_inner(config, executor, ream_db, false).await;
+}
+
+/// Runs the data node.
+pub async fn run_data_availability_node(
+    config: DataAvailabilityNodeConfig,
+    executor: ReamExecutor,
+    ream_directory: PathBuf,
+) {
+    info!(
+        "starting up Data node on {}:{}",
+        config.http_address, config.http_port
+    );
+    let data_dir = ream_directory.join("data");
+
+    set_beacon_network_spec(config.network.clone());
+
+    // The data availability RPC is unauthenticated; it must never be reachable beyond
+    // localhost.
+    if !config.http_address.is_loopback() {
+        error!(
+            "refusing to start data node: http address {} is not loopback; \
+             the data RPC must not be reachable beyond localhost",
+            config.http_address
+        );
+        return;
+    }
+
+    let server_config = RpcServerConfig::new(
+        config.http_address,
+        config.http_port,
+        config.http_allow_origin,
+    );
+
+    let store = Arc::new(FileColumnStore::new(data_dir).expect("failed to open column store"));
+    let max_blobs_per_block =
+        NonZeroUsize::new(beacon_network_spec().max_blobs_per_block_electra as usize)
+            .expect("network spec max_blobs_per_block must be nonzero");
+    let verifier = Arc::new(KzgVerifier::new(max_blobs_per_block));
+
+    let (ingest_handle, rx) = ingest_channel(DATA_AVAILABILITY_VERIFICATION_QUEUE_CAPACITY);
+    let service = DataAvailabilityVerificationService::new(
+        rx,
+        verifier.clone(),
+        store.clone(),
+        executor.clone(),
+    );
+    let mut service_task = AbortOnDrop(executor.spawn(service.run()));
+
+    let mut http_task = AbortOnDrop(executor.spawn(async move {
+        ream_rpc_data_availability::server::start(server_config, ingest_handle, store).await
+    }));
+
+    // Warm the trusted setup (multi-second) off the async workers before the
+    // first column arrives.
+    if let Err(err) = executor
+        .spawn_blocking(KzgVerifier::warm_up_trusted_setup)
+        .await
+    {
+        error!("failed to warm up KZG trusted setup: {err}");
+        return;
+    }
+
+    tokio::select! {
+        _ = &mut http_task.0 => info!("Data-availability HTTP server stopped"),
+        _ = &mut service_task.0 => info!("Data-availability verification service stopped"),
+    }
 }
 
 /// Runs the validator node.
