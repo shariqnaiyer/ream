@@ -56,6 +56,21 @@ impl LeanPendingBlocksTable {
             .map(|result| result.map_err(StoreError::from)))
     }
 
+    pub fn for_each_metadata<F>(&self, mut f: F) -> Result<(), StoreError>
+    where
+        F: FnMut(B256, u64, B256),
+    {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(Self::TABLE_DEFINITION)?;
+        for result in table.range::<<SSZEncoding<B256> as redb::Value>::SelfType<'_>>(..)? {
+            let (key, value) = result?;
+            let root = key.value();
+            let block = value.value();
+            f(root, block.block.slot, block.block.parent_root);
+        }
+        Ok(())
+    }
+
     pub fn retain<F>(&self, mut f: F) -> Result<(), crate::errors::StoreError>
     where
         F: FnMut(&B256, &<Self as REDBTable>::Value) -> bool,

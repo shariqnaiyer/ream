@@ -2158,19 +2158,14 @@ impl LeanChainService {
             )
         };
 
-        let stale_roots: Vec<_> = pending_blocks_provider
-            .iter()?
-            .filter_map(|result| match result {
-                Ok((root, block)) => {
-                    let block_slot = pending_block_slot(&block);
-                    let should_prune = !protected_roots.contains(&root)
-                        && (block_provider.contains_key(root)
-                            || block_slot <= latest_finalized_slot);
-                    should_prune.then_some(Ok(root))
-                }
-                Err(err) => Some(Err(err)),
-            })
-            .collect::<Result<_, _>>()?;
+        let mut stale_roots: Vec<B256> = Vec::new();
+        pending_blocks_provider.for_each_metadata(|root, block_slot, _parent_root| {
+            let should_prune = !protected_roots.contains(&root)
+                && (block_provider.contains_key(root) || block_slot <= latest_finalized_slot);
+            if should_prune {
+                stale_roots.push(root);
+            }
+        })?;
 
         if stale_roots.is_empty() {
             return Ok(());
