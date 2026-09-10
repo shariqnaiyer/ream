@@ -31,7 +31,7 @@ ARG FEATURES=""
 ENV FEATURES=$FEATURES
 
 # Disable default features (e.g. for `shadow-integration`, which must drop the
-# default `jemalloc` and `devnet4` features). Empty for a normal build.
+# default `jemalloc` and `devnet5` features). Empty for a normal build.
 ARG NO_DEFAULT_FEATURES=""
 ENV NO_DEFAULT_FEATURES=$NO_DEFAULT_FEATURES
 

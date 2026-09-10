@@ -20,7 +20,7 @@ name = "ream-data-availability-tool"
 path = "src/data_availability_tool/main.rs"
 
 [features]
-default = ["devnet5"]
+default = ["devnet5", "jemalloc"]
 devnet5 = [
     "ream-chain-lean/devnet5",
     "ream-consensus-lean/devnet5",
